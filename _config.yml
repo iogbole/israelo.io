@@ -1,8 +1,8 @@
 ---
 #-------------------------------
 # Site Settings
-title: ISRAELO.IO
-logo: #/images/logo.png
+title: israelo.io
+logo: /images/logo.png
 description: Thoughts on Observabilitity, DevOps and Product Management
 baseurl: "" # the subpath of your site, e.g. /blog
 url: "" # the base hostname & protocol for your site, e.g. http://example.com
@@ -13,7 +13,7 @@ color_scheme: auto # You can choose three modes auto, light, and dark. By defaul
 author:
   author__name: Israel Ogbole
   author__bio: GirlDad, Engineering Product Manager, MSc, MBA, ex-Solutions Architect, ex-Software Engineer, and now an occasional blogger
-  author__avatar: "/images/01-1.jpg"
+  author__avatar: "/images/avatar.jpeg"
 
 social:
   - { icon: "ion-logo-twitter", link: "https://twitter.com/israel_ogbole" }
