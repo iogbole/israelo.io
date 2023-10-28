@@ -1,0 +1,1000 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
+    <channel>
+        <title>ISRAELO.IO</title>
+        <description>Thoughts on Observabilitity, DevOps and Product Management</description>
+        <link>http://localhost:4000/</link>
+        <atom:link href="http://localhost:4000/feed.xml" rel="self" type="application/rss+xml"/>
+        <pubDate>Sat, 28 Oct 2023 16:26:00 +0100</pubDate>
+        <lastBuildDate>Sat, 28 Oct 2023 16:26:00 +0100</lastBuildDate>
+        <generator>Jekyll v4.3.2</generator>
+        
+            <item>
+                <title>Getting Started with eBPF: Monitoring TCP Retransmissions Using eBPF, Go and Prometheus</title>
+                <description>&lt;p&gt;As a Product Manager in tech, I strongly believe it is essential to understand the technology that underpins the products I manage. This knowledge not only allows me to keep pace with the evolving industry trends but also enriches my interactions with both customers and my engineering counterparts.&lt;/p&gt;
+
+&lt;p&gt;Recently, I’ve been working on a product that uses Extended Berkeley Packet Filter (eBPF). eBPF is a revolutionary technology that allows users to extend the functionality of the Linux kernel without having to modify the kernel code itself. Intrigued to learn more, I got a copy of Liz Rice’s book, &lt;a href=&quot;https://isovalent.com/books/learning-ebpf/&quot;&gt;“Learning eBPF”&lt;/a&gt;. The book is so enlightening that I couldn’t resist rolling up my sleeves to get hands-on with this revolutionary technology, albeit a little.&lt;/p&gt;
+
+&lt;p&gt;Further, a specific focus for me has been the use of eBPF for monitoring TCP retransmissions, which can occur when a TCP segment goes unacknowledged by its receiver within a designated time frame. My interest in TCP retransmissions stems from a challenging experience troubleshooting intermittent connectivity issues with an APM agent in a customer’s production environment, in a previous role. Had eBPF been in my toolkit back then, that painful issue would have been far easier to diagnose and resolve.&lt;/p&gt;
+
+&lt;p&gt;This blog aims to chronicle my exploration of eBPF and Go and is targeted at anyone interested in learning eBPF. We will delve into the fundamentals of monitoring network events using eBPF, Go, and Prometheus.&lt;/p&gt;
+
+&lt;blockquote&gt;
+  &lt;p&gt;The source code is available at &lt;a href=&quot;https://github.com/iogbole/ebpf-network-viz&quot;&gt;https://github.com/iogbole/ebpf-network-viz&lt;/a&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;Let’s begin by defining the problem.&lt;/p&gt;
+
+&lt;h2 id=&quot;the-ghost-in-the-network-tcp-retransmissions&quot;&gt;The Ghost in the Network: TCP Retransmissions&lt;/h2&gt;
+
+&lt;p&gt;TCP retransmissions aren’t inherently bad; they’re a fundamental part of how TCP/IP networks function. However, when they occur frequently, they can signify network issues that lead to poor application performance. A high number of retransmissions can cause:&lt;/p&gt;
+
+&lt;ul&gt;
+  &lt;li&gt;&lt;strong&gt;Increased Latency&lt;/strong&gt;: Packets have to be sent again, which takes extra time.&lt;/li&gt;
+  &lt;li&gt;&lt;strong&gt;Higher CPU Usage&lt;/strong&gt;: Both sending and receiving systems have to do additional work to handle the retransmissions.&lt;/li&gt;
+  &lt;li&gt;&lt;strong&gt;Bandwidth Inefficiency&lt;/strong&gt;: Retransmissions consume bandwidth that could be better used by new data.&lt;/li&gt;
+  &lt;li&gt;&lt;strong&gt;User Experience Degradation&lt;/strong&gt;: All the above contribute to a laggy or suboptimal user experience.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p align=&quot;center&quot;&gt;
+&lt;img width=&quot;600&quot; alt=&quot;tcp retransmission&quot; src=&quot;https://github-production-user-asset-6210df.s3.amazonaws.com/2548160/273732239-ec8dd025-ea85-4e7f-9ef3-0063ff75f1e0.png&quot; /&gt;
+&lt;/p&gt;
+
+&lt;p&gt;Imagine working on a high-speed, low-latency product and encountering intermittent slowdowns in data transmission. This situation can be tricky to diagnose and could bring your product to its knees. When I faced this issue, I took it upon myself to delve deep and understand what was happening under the hood. &lt;strong&gt;Wireshark led me to the root cause: excessive TCP retransmissions&lt;/strong&gt; due to a faulty firewall policy.&lt;/p&gt;
+
+&lt;p&gt;One can easily trigger TCP retransmission, by executing:&lt;/p&gt;
+
+&lt;div class=&quot;language-bash highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;&lt;span class=&quot;nb&quot;&gt;sudo &lt;/span&gt;tc qdisc add dev eth0 root netem loss 10% delay 100ms
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+&lt;p&gt;and it will surely mess up your network performance and introduce high CPU usage. I was once crazy enough to use 50% on an EC2 instance and it booted me out of SSH connection until I restarted the node via the console.  &lt;strong&gt;Do not try this out at home ;)&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;The goal of this experiment is simple: to collect all TCP retransmissions from the kernel and push the metrics to Prometheus, so that you can slice and dice the data as well as generate alerts if the retransmission rate exceeds a threshold.&lt;/p&gt;
+
+&lt;p&gt;&lt;img width=&quot;1510&quot; alt=&quot;prom&quot; src=&quot;https://user-images.githubusercontent.com/2548160/274725653-9b2ac550-01cc-4015-befb-9539a9b38d03.gif&quot; /&gt;&lt;/p&gt;
+
+&lt;h2 id=&quot;why-ebpf&quot;&gt;Why eBPF?&lt;/h2&gt;
+&lt;p&gt;eBPF is a revolutionary technology that allows users to extend the functionality of the Linux kernel without having to modify the kernel code itself. It is essentially a lightweight, sandboxed virtual machine that resides within the kernel, offering secure and verified access to kernel memory.&lt;/p&gt;
+
+&lt;p&gt;Moreso, eBPF code is typically written in a restricted subset of the &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;C&lt;/code&gt; language and compiled into eBPF bytecode using a compiler like Clang/LLVM. This bytecode undergoes rigorous verification to ensure that it cannot intentionally or inadvertently jeopardize the integrity of the kernel. Additionally, eBPF programs are guaranteed to execute within a finite number of instructions, making them suitable for performance-sensitive use cases like observability and network security.&lt;/p&gt;
+
+&lt;p&gt;Here are some of the key benefits of using eBPF:&lt;/p&gt;
+
+&lt;ul&gt;
+  &lt;li&gt;&lt;strong&gt;Safety and security&lt;/strong&gt;: eBPF programs are sandboxed and verified, which means that they cannot harm the kernel or the system as a whole.&lt;/li&gt;
+  &lt;li&gt;&lt;strong&gt;Performance&lt;/strong&gt;: eBPF programs are extremely efficient and can be used to implement complex functionality without impacting system performance.&lt;/li&gt;
+  &lt;li&gt;&lt;strong&gt;Flexibility&lt;/strong&gt;: eBPF can be used to implement a wide range of functionality, including network monitoring, asset discovery, security, profiling, performance tracing, and more.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Functionally, eBPF allows you to run this restricted C code in response to various events, such as timers, network events, or function calls within both the kernel and user space. These event hooks are often referred to as ‘probes’—&lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;kprobes&lt;/code&gt; for kernel function calls, &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;uprobes&lt;/code&gt; for user-space function calls, and &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;tracepoints&lt;/code&gt; for pre-defined hooks in the Linux kernel.&lt;/p&gt;
+
+&lt;p&gt;In the context of this blog post, we’ll be focusing on &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;tracepoints&lt;/code&gt;, specifically leveraging the &lt;code&gt;&lt;em&gt;tcp_retransmit_skb&lt;/em&gt;&lt;/code&gt;  tracepoint for monitoring TCP retransmissions.&lt;/p&gt;
+
+&lt;p&gt;If you are completely new to eBPF, I recommend checking out the resources in the reference section below, starting with &lt;a href=&quot;https://ebpf.io/what-is-ebpf/&quot;&gt;What is eBPF&lt;/a&gt;?&lt;/p&gt;
+
+&lt;h2 id=&quot;preparation-and-environment-setup&quot;&gt;Preparation and Environment Setup&lt;/h2&gt;
+&lt;p&gt;Before we begin, it’s important to have your development environment properly configured. While this blog isn’t an exhaustive tutorial, I’ll outline the key prerequisites briefly.&lt;/p&gt;
+
+&lt;h3 id=&quot;using-lima-on-macos&quot;&gt;&lt;strong&gt;Using Lima on MacOS&lt;/strong&gt;&lt;/h3&gt;
+&lt;p&gt;If you’re a MacOS user like me, Lima is an excellent and easy way to emulate a Linux VM. To kick things off with Lima, follow these steps:&lt;/p&gt;
+
+&lt;ol&gt;
+  &lt;li&gt;
+    &lt;p&gt;&lt;a href=&quot;https://lima-vm.io/docs/installation/&quot;&gt;Install Lima&lt;/a&gt; and launch it with the &lt;a href=&quot;https://github.com/iogbole/ebpf-network-viz/blob/main/ebpf-vm.yaml&quot;&gt;ebpf-vm.yaml&lt;/a&gt; file:&lt;/p&gt;
+
+    &lt;div class=&quot;language-bash highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt; limactl start ebpf-vm.yaml
+ limactl shell ebpf-vm
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;    &lt;/div&gt;
+  &lt;/li&gt;
+  &lt;li&gt;
+    &lt;p&gt;If you use Visual Studio Code, you can connect to the Lima VM via SSH:&lt;/p&gt;
+
+    &lt;div class=&quot;language-bash highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt; limactl show-ssh ebpf-vm
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;    &lt;/div&gt;
+    &lt;p&gt;Subsequently, use the SSH command to link up with the remote server from the VS Code on your host machine. Lima handles file sharing and 
+ port forwaring automatically.&lt;/p&gt;
+  &lt;/li&gt;
+  &lt;li&gt;
+    &lt;p&gt;After establishing the connection, clone the required repository:&lt;/p&gt;
+
+    &lt;div class=&quot;language-bash highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt; git clone https://github.com/iogbole/ebpf-network-viz.git
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;    &lt;/div&gt;
+  &lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;h3 id=&quot;manual-setup-on-linux&quot;&gt;&lt;strong&gt;Manual Setup on Linux&lt;/strong&gt;&lt;/h3&gt;
+
+&lt;p&gt;If you’re opting for a manual setup on Linux, refer to the script section in the &lt;a href=&quot;https://github.com/iogbole/ebpf-network-viz/blob/main/ebpf-vm.yaml#L18&quot;&gt;ebpf-vm.yaml&lt;/a&gt; file.&lt;/p&gt;
+
+&lt;p&gt;With your environment now primed, you’re all set to delve into the fascinating world of eBPF!&lt;/p&gt;
+
+&lt;h2 id=&quot;the-solution&quot;&gt;The Solution&lt;/h2&gt;
+
+&lt;p&gt;The diagram below depicts the solution.&lt;/p&gt;
+
+&lt;p align=&quot;center&quot;&gt;
+&lt;img width=&quot;1510&quot; alt=&quot;the solution&quot; src=&quot;https://user-images.githubusercontent.com/2548160/274510771-99bb4583-c7be-4e3e-83fc-283ea99d0195.png&quot; /&gt;
+&lt;/p&gt;
+
+&lt;h3 id=&quot;overview-of-the-components&quot;&gt;Overview of the Components&lt;/h3&gt;
+
+&lt;p&gt;This is how the code works at a very high level:&lt;/p&gt;
+
+&lt;ol&gt;
+  &lt;li&gt;
+    &lt;p&gt;&lt;strong&gt;Bytecode Loaded by Go&lt;/strong&gt;: The eBPF bytecode is loaded into the kernel using a Go program, which makes use of the &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;github.com/cilium/ebpf&lt;/code&gt; package.&lt;/p&gt;
+  &lt;/li&gt;
+  &lt;li&gt;
+    &lt;p&gt;&lt;strong&gt;eBPF Code Hooks to Tracepoints&lt;/strong&gt;: The eBPF program uses the &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;tracepoint/tcp/tcp_retransmit_skb&lt;/code&gt; to monitor TCP retransmissions. This allows the code to trigger whenever a TCP packet is retransmitted.&lt;/p&gt;
+  &lt;/li&gt;
+  &lt;li&gt;
+    &lt;p&gt;&lt;strong&gt;Collect Retransmission Events&lt;/strong&gt;: The data relating to the retransmitted packets—such as IP addresses, ports, and the protocol family are collected in a structured manner.&lt;/p&gt;
+  &lt;/li&gt;
+  &lt;li&gt;
+    &lt;p&gt;&lt;strong&gt;Use of eBPF Maps&lt;/strong&gt;: eBPF maps are used to communicate between the eBPF code running in the kernel and the Go application running in user space.&lt;/p&gt;
+  &lt;/li&gt;
+  &lt;li&gt;
+    &lt;p&gt;&lt;strong&gt;Perf Buffer&lt;/strong&gt;: A perf event buffer is used to read the events generated by the eBPF code.&lt;/p&gt;
+  &lt;/li&gt;
+  &lt;li&gt;
+    &lt;p&gt;&lt;strong&gt;Exposed to HTTP&lt;/strong&gt;: The Go application exposes the metrics over HTTP on port 2112.&lt;/p&gt;
+  &lt;/li&gt;
+  &lt;li&gt;
+    &lt;p&gt;&lt;strong&gt;Prometheus Scrapes Metrics&lt;/strong&gt;: Finally, Prometheus is configured to scrape these exposed metrics for monitoring or alerting purposes.&lt;/p&gt;
+  &lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;h3 id=&quot;anatomy-of-the-ebpf-c-code&quot;&gt;Anatomy of the eBPF C Code&lt;/h3&gt;
+&lt;p&gt;source: &lt;a href=&quot;https://github.com/iogbole/ebpf-network-viz/blob/main/src/ebpf/retrans.c&quot;&gt;retrans.c&lt;/a&gt;&lt;/p&gt;
+
+&lt;h4 id=&quot;bpf-co-re&quot;&gt;BPF CO-RE&lt;/h4&gt;
+
+&lt;p&gt;The headers are essential for the program to function correctly. Notably, &lt;a href=&quot;https://github.com/iogbole/ebpf-network-viz/blob/main/src/ebpf/vmlinux.h&quot;&gt;&lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;vmlinux.h&lt;/code&gt;&lt;/a&gt; is a header generated by BPF CO-RE. BPF CO-RE (Compile Once, Run Everywhere) enhances the portability of eBPF programs across different kernel versions. It resolves as much as possible at compile time, using placeholders for kernel-specific information that can only be determined at runtime. When the program is loaded into the kernel, these placeholders are populated with actual values. This flexibility eliminates the need for recompilation when deploying on different kernel versions. Through BPF CO-RE, the &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;vmlinux.h&lt;/code&gt; header is generated to represent kernel structures, making it easier to write eBPF programs that are not tightly bound to specific kernels.&lt;/p&gt;
+
+&lt;div class=&quot;language-c highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;&lt;span class=&quot;cp&quot;&gt;#include&lt;/span&gt; &lt;span class=&quot;cpf&quot;&gt;&quot;vmlinux.h&quot;&lt;/span&gt;&lt;span class=&quot;cp&quot;&gt;
+#include&lt;/span&gt; &lt;span class=&quot;cpf&quot;&gt;&amp;lt;bpf/bpf_helpers.h&amp;gt;&lt;/span&gt;&lt;span class=&quot;cp&quot;&gt;
+#include&lt;/span&gt; &lt;span class=&quot;cpf&quot;&gt;&amp;lt;bpf/bpf_endian.h&amp;gt;&lt;/span&gt;&lt;span class=&quot;cp&quot;&gt;
+#include&lt;/span&gt; &lt;span class=&quot;cpf&quot;&gt;&amp;lt;bpf/bpf_tracing.h&amp;gt;&lt;/span&gt;&lt;span class=&quot;cp&quot;&gt;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;To generate the &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;vmlinux.h&lt;/code&gt; file, execute:&lt;/p&gt;
+
+&lt;div class=&quot;language-bash highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;bpftool btf dump file /sys/kernel/btf/vmlinux format c &lt;span class=&quot;o&quot;&gt;&amp;gt;&lt;/span&gt; vmlinux.h
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;h4 id=&quot;data-structures&quot;&gt;Data Structures&lt;/h4&gt;
+
+&lt;p&gt;The &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;event&lt;/code&gt; and &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;tcp_retransmit_skb_ctx&lt;/code&gt; structures are defined to hold the information related to TCP retransmissions. The structures collect various fields such as timestamps, process IDs, source and destination ports, and more.&lt;/p&gt;
+
+&lt;div class=&quot;language-c highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;&lt;span class=&quot;k&quot;&gt;struct&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;event&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;__u64&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;timestamp&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;__u32&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;pid&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;__u16&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;sport&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;dport&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;__u8&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;saddr&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;4&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;],&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;daddr&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;4&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;];&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;__u8&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;saddr_v6&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;16&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;],&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;daddr_v6&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;16&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;];&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;__u16&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;family&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
+    &lt;span class=&quot;kt&quot;&gt;int&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;state&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
+&lt;span class=&quot;p&quot;&gt;};&lt;/span&gt;
+
+&lt;span class=&quot;c1&quot;&gt;// Struct to receive context from tracepoint&lt;/span&gt;
+&lt;span class=&quot;k&quot;&gt;struct&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;tcp_retransmit_skb_ctx&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;__u64&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;_pad0&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
+    &lt;span class=&quot;kt&quot;&gt;void&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;*&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;skbaddr&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
+    &lt;span class=&quot;kt&quot;&gt;void&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;*&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;skaddr&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
+    &lt;span class=&quot;kt&quot;&gt;int&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;state&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;__u16&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;sport&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;__u16&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;dport&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;__u16&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;family&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;__u8&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;saddr&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;4&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;];&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;__u8&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;daddr&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;4&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;];&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;__u8&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;saddr_v6&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;16&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;];&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;__u8&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;daddr_v6&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;mi&quot;&gt;16&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;];&lt;/span&gt;
+&lt;span class=&quot;p&quot;&gt;};&lt;/span&gt;
+
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;h5 id=&quot;finding-data-structures-for-other-tracepoints&quot;&gt;&lt;strong&gt;Finding Data Structures for Other Tracepoints&lt;/strong&gt;&lt;/h5&gt;
+
+&lt;p&gt;Understanding the data structures associated with tracepoints is a key aspect when you’re diving into eBPF programs for monitoring or debugging. While I focused on the &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;tcp_retransmit_skb&lt;/code&gt; tracepoint in this blog, you may wish to explore other tracepoints. Here’s how you can discover the necessary data structures for those:&lt;/p&gt;
+
+&lt;ol&gt;
+  &lt;li&gt;
+    &lt;p&gt;&lt;strong&gt;Locate Tracepoint Definitions&lt;/strong&gt;: Typically, tracepoints are defined within the Linux Kernel source code. The definitions can usually be found under &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;/sys/kernel/debug/tracing/events/&lt;/code&gt; directory on a Linux system with the tracing subsystem enabled. Navigate through the folders to find the tracepoint of interest.&lt;/p&gt;
+  &lt;/li&gt;
+  &lt;li&gt;
+    &lt;p&gt;&lt;strong&gt;Reading Format Files&lt;/strong&gt;: Within each tracepoint directory, you’ll find a &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;format&lt;/code&gt; file that describes the event structure. This will provide you with the types and names of the fields that are available for that particular tracepoint.&lt;/p&gt;
+
+    &lt;div class=&quot;language-bash highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt; &lt;span class=&quot;nb&quot;&gt;cat&lt;/span&gt; /sys/kernel/debug/tracing/events/tcp/tcp_retransmit_skb/format
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;    &lt;/div&gt;
+
+    &lt;p&gt;This will display the format for the &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;tcp_retransmit_skb&lt;/code&gt; tracepoint as an example.&lt;/p&gt;
+  &lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;By familiarising yourself with the format files and possibly the kernel source code, you can create or adapt eBPF programs to tap into a wide range of system events, not just TCP retransmissions.&lt;/p&gt;
+
+&lt;h4 id=&quot;bpf-maps&quot;&gt;BPF Maps&lt;/h4&gt;
+
+&lt;p&gt;The BPF map &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;events&lt;/code&gt; is defined as a perf event array. This map serves as a communication channel between user space (Go program) and kernel space (eBPF program).&lt;/p&gt;
+
+&lt;div class=&quot;language-c highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;&lt;span class=&quot;k&quot;&gt;struct&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;__uint&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;type&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;BPF_MAP_TYPE_PERF_EVENT_ARRAY&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;);&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;__uint&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;key_size&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;sizeof&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;__u32&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;));&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;__uint&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;value_size&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;sizeof&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;__u32&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;));&lt;/span&gt;
+&lt;span class=&quot;p&quot;&gt;}&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;events&lt;/span&gt; &lt;span class=&quot;nf&quot;&gt;SEC&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&quot;.maps&quot;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;);&lt;/span&gt;
+
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;h4 id=&quot;tracepoint-function&quot;&gt;Tracepoint Function&lt;/h4&gt;
+
+&lt;p&gt;The function &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;tracepoint__tcp__tcp_retransmit_skb&lt;/code&gt; is attached to the &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;tcp_retransmit_skb&lt;/code&gt; tracepoint. Here, various fields are read and stored in an &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;event&lt;/code&gt; structure.&lt;/p&gt;
+
+&lt;div class=&quot;language-c highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;
+&lt;span class=&quot;n&quot;&gt;SEC&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&quot;tracepoint/tcp/tcp_retransmit_skb&quot;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+&lt;span class=&quot;kt&quot;&gt;int&lt;/span&gt; &lt;span class=&quot;nf&quot;&gt;tracepoint__tcp__tcp_retransmit_skb&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;k&quot;&gt;struct&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;tcp_retransmit_skb_ctx&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;*&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;ctx&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;
+ &lt;span class=&quot;c1&quot;&gt;// ... code logic&lt;/span&gt;
+&lt;span class=&quot;p&quot;&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;h4 id=&quot;compiling-the-ebpf-code&quot;&gt;Compiling the eBPF Code&lt;/h4&gt;
+
+&lt;p&gt;Compile the eBPF program using the script &lt;a href=&quot;https://github.com/iogbole/ebpf-network-viz/blob/main/run_clang.sh&quot;&gt;&lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;run_clang.sh&lt;/code&gt;&lt;/a&gt;:&lt;/p&gt;
+
+&lt;div class=&quot;language-bash highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;
+clang &lt;span class=&quot;nt&quot;&gt;-O2&lt;/span&gt; &lt;span class=&quot;nt&quot;&gt;-g&lt;/span&gt; &lt;span class=&quot;nt&quot;&gt;-target&lt;/span&gt; bpf &lt;span class=&quot;nt&quot;&gt;-c&lt;/span&gt; ./ebpf/retrans.c &lt;span class=&quot;nt&quot;&gt;-o&lt;/span&gt; ./ebpf/retrans.o &lt;span class=&quot;nt&quot;&gt;-I&lt;/span&gt;/usr/include &lt;span class=&quot;nt&quot;&gt;-I&lt;/span&gt;/usr/src/linux-headers-&lt;span class=&quot;si&quot;&gt;$(&lt;/span&gt;&lt;span class=&quot;nb&quot;&gt;uname&lt;/span&gt; &lt;span class=&quot;nt&quot;&gt;-r&lt;/span&gt;&lt;span class=&quot;si&quot;&gt;)&lt;/span&gt;/include  &lt;span class=&quot;nt&quot;&gt;-D&lt;/span&gt; __BPF_TRACING__
+
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;h3 id=&quot;the-go-program&quot;&gt;The Go Program&lt;/h3&gt;
+
+&lt;p&gt;source: &lt;a href=&quot;https://github.com/iogbole/ebpf-network-viz/blob/main/src/main.go&quot;&gt;main.go&lt;/a&gt;&lt;/p&gt;
+
+&lt;h4 id=&quot;import-packages&quot;&gt;Import Packages&lt;/h4&gt;
+
+&lt;p&gt;The code starts by importing necessary Go packages including eBPF and Prometheus libraries.&lt;/p&gt;
+
+&lt;div class=&quot;language-go highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;
+&lt;span class=&quot;k&quot;&gt;import&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;
+    &lt;span class=&quot;s&quot;&gt;&quot;github.com/cilium/ebpf&quot;&lt;/span&gt;
+    &lt;span class=&quot;s&quot;&gt;&quot;github.com/prometheus/client_golang/prometheus&quot;&lt;/span&gt;
+    &lt;span class=&quot;c&quot;&gt;// ... other imports&lt;/span&gt;
+&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;h4 id=&quot;loading-the-ebpf-program&quot;&gt;Loading the eBPF Program&lt;/h4&gt;
+
+&lt;p&gt;Here, the eBPF bytecode is loaded from the &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;.o&lt;/code&gt; object file. I opted to load the eBPF bytecode from a pre-compiled .o object file. This object file contains the bytecode of our eBPF program, which is what gets executed within the kernel. I chose this approach to maintain a clear separation of concerns: the compilation of the eBPF program is distinct from its execution. Other examples I have seen use gobpf libraries to load the C code at compile time - this approach might be easier from a CI/CD build process.&lt;/p&gt;
+
+&lt;div class=&quot;language-go highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;
+&lt;span class=&quot;k&quot;&gt;func&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;main&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;()&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;
+	&lt;span class=&quot;c&quot;&gt;// Load eBPF program&lt;/span&gt;
+	&lt;span class=&quot;n&quot;&gt;spec&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;err&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;:=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;ebpf&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;LoadCollectionSpec&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;objFileName&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+	&lt;span class=&quot;k&quot;&gt;if&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;err&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;!=&lt;/span&gt; &lt;span class=&quot;no&quot;&gt;nil&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;
+		&lt;span class=&quot;nb&quot;&gt;panic&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;err&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+	&lt;span class=&quot;p&quot;&gt;}&lt;/span&gt;
+
+	&lt;span class=&quot;n&quot;&gt;coll&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;err&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;:=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;ebpf&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;NewCollectionWithOptions&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;spec&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;ebpf&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;CollectionOptions&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;
+		&lt;span class=&quot;n&quot;&gt;Programs&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;:&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;ebpf&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;ProgramOptions&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;
+			&lt;span class=&quot;c&quot;&gt;//Verbose to catch eBPF verifier issues&lt;/span&gt;
+			&lt;span class=&quot;n&quot;&gt;LogLevel&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;:&lt;/span&gt; &lt;span class=&quot;m&quot;&gt;1&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt;
+			&lt;span class=&quot;n&quot;&gt;LogSize&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;:&lt;/span&gt;  &lt;span class=&quot;m&quot;&gt;65535&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt;
+		&lt;span class=&quot;p&quot;&gt;},&lt;/span&gt;
+	&lt;span class=&quot;p&quot;&gt;})&lt;/span&gt;
+  &lt;span class=&quot;o&quot;&gt;....&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;h4 id=&quot;attach-to-tracepoint&quot;&gt;Attach to Tracepoint&lt;/h4&gt;
+
+&lt;p&gt;The program attaches to the &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;tcp_retransmit_skb&lt;/code&gt; tracepoint using the &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;link.Tracepoint&lt;/code&gt; function.&lt;/p&gt;
+
+&lt;div class=&quot;language-go highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;
+&lt;span class=&quot;n&quot;&gt;tp&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;err&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;:=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;link&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;Tracepoint&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&quot;tcp&quot;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;s&quot;&gt;&quot;tcp_retransmit_skb&quot;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;prog&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;no&quot;&gt;nil&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;h4 id=&quot;perf-event-buffer&quot;&gt;Perf Event Buffer&lt;/h4&gt;
+
+&lt;p&gt;A perf event buffer is set up to read events from the kernel space.&lt;/p&gt;
+
+&lt;div class=&quot;language-go highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;
+&lt;span class=&quot;c&quot;&gt;// Set up the perf buffer to receive events&lt;/span&gt;
+	&lt;span class=&quot;n&quot;&gt;events&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;err&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;:=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;perf&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;NewReader&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;coll&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;Maps&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&quot;events&quot;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;],&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;os&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;Getpagesize&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;())&lt;/span&gt;
+	&lt;span class=&quot;k&quot;&gt;if&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;err&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;!=&lt;/span&gt; &lt;span class=&quot;no&quot;&gt;nil&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;
+		&lt;span class=&quot;nb&quot;&gt;panic&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;err&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+	&lt;span class=&quot;p&quot;&gt;}&lt;/span&gt;
+	&lt;span class=&quot;k&quot;&gt;defer&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;events&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;Close&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;()&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;The Perf Event Buffer plays an essential part in bridging the gap between user-space and kernel-space communication. This buffer is a data structure that’s set up to read events directly from the kernel. Essentially, it acts as a queuing mechanism, holding data that your eBPF program collects from various probes until your user-space application is ready to process it.&lt;/p&gt;
+
+&lt;p&gt;Here’s how it generally works:&lt;/p&gt;
+
+&lt;ol&gt;
+  &lt;li&gt;
+    &lt;p&gt;Your eBPF program attaches to specific kernel functions or tracepoints and collects data, such as packet information in the case of networking or syscall information for system-level observability.&lt;/p&gt;
+  &lt;/li&gt;
+  &lt;li&gt;
+    &lt;p&gt;This data is then pushed to the Perf Event Buffer.&lt;/p&gt;
+  &lt;/li&gt;
+  &lt;li&gt;
+    &lt;p&gt;Your user-space application, written in Go, in this case, then reads from this buffer to retrieve the data for further analysis or action.&lt;/p&gt;
+  &lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;The &lt;strong&gt;&lt;a href=&quot;https://www.kernel.org/doc/html/next/bpf/ringbuf.html&quot;&gt;BPF ring buffer&lt;/a&gt;&lt;/strong&gt; is a more modern alternative to Perf Event buffers, suitable for newer Kernel version&lt;/p&gt;
+
+&lt;h3 id=&quot;exposing-metrics-to-prometheus&quot;&gt;Exposing Metrics to Prometheus&lt;/h3&gt;
+
+&lt;p&gt;To expose the metrics gathered by your eBPF program for monitoring, I decided to use Prometheus in the setup. Here’s what I did:&lt;/p&gt;
+
+&lt;h4 id=&quot;prometheus-metrics-definition&quot;&gt;Prometheus Metrics Definition&lt;/h4&gt;
+
+&lt;p&gt;Firstly, define the events and metrics that Prometheus will scrape. In this instance:&lt;/p&gt;
+
+&lt;div class=&quot;language-go highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;
+&lt;span class=&quot;k&quot;&gt;var&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;tcpRetransmissions&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;promauto&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;NewCounterVec&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;prometheus&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;CounterOpts&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;Name&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;:&lt;/span&gt; &lt;span class=&quot;s&quot;&gt;&quot;tcp_retransmissions_total&quot;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;Help&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;:&lt;/span&gt; &lt;span class=&quot;s&quot;&gt;&quot;Total number of TCP retransmissions&quot;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt;
+&lt;span class=&quot;p&quot;&gt;},&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;[]&lt;/span&gt;&lt;span class=&quot;kt&quot;&gt;string&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&quot;ip_version&quot;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;s&quot;&gt;&quot;src_ip&quot;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;s&quot;&gt;&quot;src_port&quot;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;s&quot;&gt;&quot;dst_ip&quot;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;s&quot;&gt;&quot;dst_port&quot;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;})&lt;/span&gt;
+
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;h4 id=&quot;starting-the-http-server&quot;&gt;Starting the HTTP Server&lt;/h4&gt;
+
+&lt;p&gt;After defining the metrics, the next step is to expose them through an HTTP endpoint. This is done by starting an HTTP server and mapping the &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;/metrics&lt;/code&gt; path to a Prometheus handler:&lt;/p&gt;
+
+&lt;div class=&quot;language-go highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;
+&lt;span class=&quot;c&quot;&gt;// Start HTTP server for Prometheus scraping&lt;/span&gt;
+&lt;span class=&quot;n&quot;&gt;http&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;Handle&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&quot;/metrics&quot;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;promhttp&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;Handler&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;())&lt;/span&gt;
+&lt;span class=&quot;k&quot;&gt;go&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;func&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;()&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;
+    &lt;span class=&quot;k&quot;&gt;if&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;err&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;:=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;http&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;ListenAndServe&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&quot;:2112&quot;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;no&quot;&gt;nil&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;);&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;err&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;!=&lt;/span&gt; &lt;span class=&quot;no&quot;&gt;nil&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;
+        &lt;span class=&quot;nb&quot;&gt;panic&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;err&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+    &lt;span class=&quot;p&quot;&gt;}&lt;/span&gt;
+&lt;span class=&quot;p&quot;&gt;}()&lt;/span&gt;
+
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;In this example, the HTTP server listens on port 2112, and Prometheus is configured to scrape metrics from this endpoint. When Prometheus accesses the &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;/metrics&lt;/code&gt; path, it invokes the &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;promhttp.Handler()&lt;/code&gt;, which in turn retrieves the metric data stored in &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;tcpRetransmissions&lt;/code&gt;. This makes the data available for Prometheus to collect.&lt;/p&gt;
+
+&lt;p&gt;By combining these two components, you create a seamless pipeline that collects, exposes, and monitors TCP retransmission metrics in near real-time.&lt;/p&gt;
+
+&lt;h4 id=&quot;the-event-loop-and-metrics-update&quot;&gt;The Event Loop and Metrics Update&lt;/h4&gt;
+
+&lt;p&gt;The heart of the go code lies in the event loop, which continuously polls for new events from the perf event buffer. Each incoming event is processed and the relevant Prometheus metrics are updated accordingly.&lt;/p&gt;
+
+&lt;p&gt;The loop employs the &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;events.Read()&lt;/code&gt; method on the perf buffer to listen for new incoming events:&lt;/p&gt;
+
+&lt;div class=&quot;language-go highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;        &lt;span class=&quot;c&quot;&gt;// Listen for events from the perf ring buffer&lt;/span&gt;
+	&lt;span class=&quot;n&quot;&gt;fmt&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;Println&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&quot;Monitoring TCP retransmissions...&quot;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+	&lt;span class=&quot;k&quot;&gt;for&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;
+		&lt;span class=&quot;k&quot;&gt;select&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;
+		&lt;span class=&quot;k&quot;&gt;case&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;&amp;lt;-&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;sig&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;:&lt;/span&gt;
+			&lt;span class=&quot;n&quot;&gt;fmt&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;Println&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&quot;&lt;/span&gt;&lt;span class=&quot;se&quot;&gt;\n&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;Received signal, stopping...&quot;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+			&lt;span class=&quot;k&quot;&gt;return&lt;/span&gt;
+		&lt;span class=&quot;k&quot;&gt;default&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;:&lt;/span&gt;
+			&lt;span class=&quot;n&quot;&gt;record&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;err&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;:=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;events&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;Read&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;()&lt;/span&gt;
+			&lt;span class=&quot;k&quot;&gt;if&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;err&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;!=&lt;/span&gt; &lt;span class=&quot;no&quot;&gt;nil&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;
+				&lt;span class=&quot;k&quot;&gt;if&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;perf&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;IsUnknownEvent&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;err&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;
+					&lt;span class=&quot;k&quot;&gt;continue&lt;/span&gt;
+				&lt;span class=&quot;p&quot;&gt;}&lt;/span&gt;
+				&lt;span class=&quot;nb&quot;&gt;panic&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;err&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+			&lt;span class=&quot;p&quot;&gt;}&lt;/span&gt;
+
+			&lt;span class=&quot;n&quot;&gt;event&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;:=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;tcpRetransmitEvent&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;{}&lt;/span&gt;
+			&lt;span class=&quot;n&quot;&gt;err&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;binary&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;Read&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;bytes&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;NewReader&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;record&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;RawSample&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;),&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;binary&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;LittleEndian&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;,&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;&amp;amp;&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;event&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+			&lt;span class=&quot;k&quot;&gt;if&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;err&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;!=&lt;/span&gt; &lt;span class=&quot;no&quot;&gt;nil&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;{&lt;/span&gt;
+				&lt;span class=&quot;nb&quot;&gt;panic&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;err&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+			&lt;span class=&quot;p&quot;&gt;}&lt;/span&gt;
+&lt;span class=&quot;o&quot;&gt;...&lt;/span&gt;
+
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;Upon receiving an event, the loop processes it and updates the Prometheus &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;tcpRetransmissions&lt;/code&gt; metric. The specifics of this processing depend on the structure and content of the events, which are designed to capture various data fields such as timestamps, process IDs, source and destination ports, and so forth.&lt;/p&gt;
+
+&lt;p&gt;To summarise, the event loop, in combination with the previously described Prometheus setup, allows the system to efficiently collect, process, and expose metrics for TCP retransmissions in a manner that is  consistent with other monitoring and observability tools.&lt;/p&gt;
+
+&lt;p&gt;Next, ensure the go code works:&lt;/p&gt;
+
+&lt;div class=&quot;language-bash highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;
+&lt;span class=&quot;nb&quot;&gt;sudo &lt;/span&gt;go run ./src/main.go
+
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;This is also a good time to confirm that the Go HTTP server is up and running:&lt;/p&gt;
+&lt;p align=&quot;center&quot;&gt;
+&lt;img width=&quot;1510&quot; alt=&quot;go http server&quot; src=&quot;https://user-images.githubusercontent.com/2548160/273732043-9f3ba1d3-1059-4bba-8ac5-715ecf73e817.png&quot; /&gt;
+&lt;/p&gt;
+
+&lt;h3 id=&quot;setting-up-prometheus-in-the-lima-vm-using-nerdctl&quot;&gt;Setting Up Prometheus in the Lima VM using nerdctl&lt;/h3&gt;
+
+&lt;p&gt;Since the development environment is within a Lima VM, it’s advantageous to leverage &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;nerdctl&lt;/code&gt; for container management. &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;nerdctl&lt;/code&gt; is a Docker-compatible CLI tool for containers, which is already bundled with Lima. Here’s how to set up Prometheus using a custom configuration and a shell script for automation.&lt;/p&gt;
+
+&lt;h4 id=&quot;prometheus-configuration-prometheusyml&quot;&gt;Prometheus Configuration: &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;prometheus.yml&lt;/code&gt;&lt;/h4&gt;
+
+&lt;p&gt;source: &lt;a href=&quot;https://github.com/iogbole/ebpf-network-viz/blob/main/prom_config/prometheus.yml&quot;&gt;prometheus.yml&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;The &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;prometheus.yml&lt;/code&gt; configuration specifies how often Prometheus scrapes metrics and from where. In this case, it is configured to scrape the metrics exposed by the Go application running on port 2112.&lt;/p&gt;
+
+&lt;p&gt;Here’s the content of &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;prometheus.yml&lt;/code&gt;:&lt;/p&gt;
+
+&lt;div class=&quot;language-yaml highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;&lt;span class=&quot;na&quot;&gt;global&lt;/span&gt;&lt;span class=&quot;pi&quot;&gt;:&lt;/span&gt;
+  &lt;span class=&quot;na&quot;&gt;scrape_interval&lt;/span&gt;&lt;span class=&quot;pi&quot;&gt;:&lt;/span&gt; &lt;span class=&quot;s&quot;&gt;15s&lt;/span&gt;
+
+&lt;span class=&quot;na&quot;&gt;scrape_configs&lt;/span&gt;&lt;span class=&quot;pi&quot;&gt;:&lt;/span&gt;
+  &lt;span class=&quot;pi&quot;&gt;-&lt;/span&gt; &lt;span class=&quot;na&quot;&gt;job_name&lt;/span&gt;&lt;span class=&quot;pi&quot;&gt;:&lt;/span&gt; &lt;span class=&quot;s1&quot;&gt;&apos;&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;TCPRetrans&apos;&lt;/span&gt;
+    &lt;span class=&quot;na&quot;&gt;static_configs&lt;/span&gt;&lt;span class=&quot;pi&quot;&gt;:&lt;/span&gt;
+    &lt;span class=&quot;pi&quot;&gt;-&lt;/span&gt; &lt;span class=&quot;na&quot;&gt;targets&lt;/span&gt;&lt;span class=&quot;pi&quot;&gt;:&lt;/span&gt; &lt;span class=&quot;pi&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;s1&quot;&gt;&apos;&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;127.0.0.1:2112&apos;&lt;/span&gt;&lt;span class=&quot;pi&quot;&gt;]&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;h4 id=&quot;shell-script-for-automated-setup&quot;&gt;Shell Script for Automated Setup&lt;/h4&gt;
+
+&lt;p&gt;The shell script performs several tasks to ensure Prometheus runs correctly:&lt;/p&gt;
+
+&lt;ol&gt;
+  &lt;li&gt;
+    &lt;p&gt;&lt;strong&gt;Getting the IP Address&lt;/strong&gt;: The script first retrieves the IP address of &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;eth0&lt;/code&gt; on the host machine.&lt;/p&gt;
+  &lt;/li&gt;
+  &lt;li&gt;
+    &lt;p&gt;&lt;strong&gt;Updating Configuration&lt;/strong&gt;: It then replaces the IP address in the &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;prometheus.yml&lt;/code&gt; configuration file to point to the correct address where the Go application is exposing metrics.&lt;/p&gt;
+  &lt;/li&gt;
+  &lt;li&gt;
+    &lt;p&gt;&lt;strong&gt;Running Prometheus&lt;/strong&gt;: Finally, it runs the Prometheus container using nerdctl, mapping it to port 9090.&lt;/p&gt;
+  &lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;div class=&quot;language-bash highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;
+&lt;span class=&quot;c&quot;&gt;#!/bin/bash&lt;/span&gt;
+
+&lt;span class=&quot;nv&quot;&gt;IP_ADDRESS&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;si&quot;&gt;$(&lt;/span&gt;ip &lt;span class=&quot;nt&quot;&gt;-4&lt;/span&gt; addr show eth0 | &lt;span class=&quot;nb&quot;&gt;grep&lt;/span&gt; &lt;span class=&quot;nt&quot;&gt;-oP&lt;/span&gt; &lt;span class=&quot;s1&quot;&gt;&apos;(?&amp;amp;lt;=inet\s)\d+(\.\d+){3}&apos;&lt;/span&gt;&lt;span class=&quot;si&quot;&gt;)&lt;/span&gt;
+
+&lt;span class=&quot;c&quot;&gt;# Replace the IP address in the prometheus.yml file.&lt;/span&gt;
+&lt;span class=&quot;nv&quot;&gt;CONFIG_FILE&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;&lt;span class=&quot;s2&quot;&gt;&quot;prom_config/prometheus.yml&quot;&lt;/span&gt;
+&lt;span class=&quot;nb&quot;&gt;sed&lt;/span&gt; &lt;span class=&quot;nt&quot;&gt;-i&lt;/span&gt; &lt;span class=&quot;s2&quot;&gt;&quot;s/[0-9]&lt;/span&gt;&lt;span class=&quot;se&quot;&gt;\+\.&lt;/span&gt;&lt;span class=&quot;s2&quot;&gt;[0-9]&lt;/span&gt;&lt;span class=&quot;se&quot;&gt;\+\.&lt;/span&gt;&lt;span class=&quot;s2&quot;&gt;[0-9]&lt;/span&gt;&lt;span class=&quot;se&quot;&gt;\+\.&lt;/span&gt;&lt;span class=&quot;s2&quot;&gt;[0-9]&lt;/span&gt;&lt;span class=&quot;se&quot;&gt;\+&lt;/span&gt;&lt;span class=&quot;s2&quot;&gt;:2112/&lt;/span&gt;&lt;span class=&quot;k&quot;&gt;${&lt;/span&gt;&lt;span class=&quot;nv&quot;&gt;IP_ADDRESS&lt;/span&gt;&lt;span class=&quot;k&quot;&gt;}&lt;/span&gt;&lt;span class=&quot;s2&quot;&gt;:2112/g&quot;&lt;/span&gt; &lt;span class=&quot;s2&quot;&gt;&quot;&lt;/span&gt;&lt;span class=&quot;nv&quot;&gt;$CONFIG_FILE&lt;/span&gt;&lt;span class=&quot;s2&quot;&gt;&quot;&lt;/span&gt;
+&lt;span class=&quot;nb&quot;&gt;echo&lt;/span&gt; &lt;span class=&quot;s2&quot;&gt;&quot;Updated prometheus.yml with IP address: &lt;/span&gt;&lt;span class=&quot;nv&quot;&gt;$IP_ADDRESS&lt;/span&gt;&lt;span class=&quot;s2&quot;&gt;&quot;&lt;/span&gt;
+&lt;span class=&quot;nb&quot;&gt;sleep &lt;/span&gt;3
+nerdctl run &lt;span class=&quot;nt&quot;&gt;--rm&lt;/span&gt; &lt;span class=&quot;nt&quot;&gt;-p&lt;/span&gt; 9090:9090 &lt;span class=&quot;nt&quot;&gt;-v&lt;/span&gt; &lt;span class=&quot;s2&quot;&gt;&quot;&lt;/span&gt;&lt;span class=&quot;nv&quot;&gt;$PWD&lt;/span&gt;&lt;span class=&quot;s2&quot;&gt;/prom_config:/etc/prometheus&quot;&lt;/span&gt; prom/prometheus
+
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;This script automates the process, making it easier to deploy Prometheus within your Lima VM.&lt;/p&gt;
+
+&lt;p&gt;Since Lima also does automatic port forwarding, you should be able to access Prometheus on your host machine at &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;localhost:9090&lt;/code&gt; and the metrics exposed by the Go application at &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;localhost:2112/metrics&lt;/code&gt;.&lt;/p&gt;
+
+&lt;p&gt;Check and ensure that the job_name is registered.&lt;/p&gt;
+
+&lt;p align=&quot;center&quot;&gt;
+&lt;img width=&quot;1510&quot; alt=&quot;prom_config&quot; src=&quot;https://user-images.githubusercontent.com/2548160/273732084-60e7b5fa-d165-4740-ac64-10acc8636c62.png&quot; /&gt;
+&lt;/p&gt;
+
+&lt;h2 id=&quot;create-tcp-chaos-testing-it-all-out&quot;&gt;Create TCP Chaos: Testing It All Out&lt;/h2&gt;
+
+&lt;p&gt;To put the eBPF program and Prometheus monitoring into action, you need to introduce network issues in the VM. The &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;tc&lt;/code&gt; (traffic control) command in Linux allows you to simulate network issues for testing purposes. The &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;create_tcp_chaos.sh&lt;/code&gt; shell script below automates this process, first creating the chaos and then removing it after the test.&lt;/p&gt;
+
+&lt;h3 id=&quot;the-create_tcp_chaossh-shell-script&quot;&gt;The create_tcp_chaos.sh Shell Script&lt;/h3&gt;
+
+&lt;p&gt;source : &lt;a href=&quot;https://github.com/iogbole/ebpf-network-viz/blob/main/create_tcp_chaos.sh&quot;&gt;create_tcp_chaos.sh&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Here’s the script that introduces packet loss and latency to &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;eth0&lt;/code&gt; using &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;tc&lt;/code&gt;.&lt;/p&gt;
+
+&lt;div class=&quot;language-bash highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;
+&lt;span class=&quot;c&quot;&gt;#!/bin/bash&lt;/span&gt;
+
+&lt;span class=&quot;c&quot;&gt;# Define websites to send requests to.&lt;/span&gt;
+&lt;span class=&quot;nv&quot;&gt;websites&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=(&lt;/span&gt;&lt;span class=&quot;s2&quot;&gt;&quot;http://example.com&quot;&lt;/span&gt; &lt;span class=&quot;s2&quot;&gt;&quot;https://www.google.com&quot;&lt;/span&gt; &lt;span class=&quot;s2&quot;&gt;&quot;https://www.wikipedia.org&quot;&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;)&lt;/span&gt;
+&lt;span class=&quot;c&quot;&gt;# Set the number of iterations for the loop.&lt;/span&gt;
+&lt;span class=&quot;nv&quot;&gt;loop_count&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt;20
+&lt;span class=&quot;c&quot;&gt;# Introduce network latency and packet loss using tc.&lt;/span&gt;
+&lt;span class=&quot;nb&quot;&gt;sudo &lt;/span&gt;tc qdisc add dev eth0 root netem loss 5% delay 100ms
+
+&lt;span class=&quot;c&quot;&gt;# Loop to send requests to the websites.&lt;/span&gt;
+
+&lt;span class=&quot;k&quot;&gt;for&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;((&lt;/span&gt;i &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; 1&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt; i &amp;lt;&lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; loop_count&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt; i++&lt;span class=&quot;o&quot;&gt;))&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;do
+    for &lt;/span&gt;site &lt;span class=&quot;k&quot;&gt;in&lt;/span&gt; &lt;span class=&quot;s2&quot;&gt;&quot;&lt;/span&gt;&lt;span class=&quot;k&quot;&gt;${&lt;/span&gt;&lt;span class=&quot;nv&quot;&gt;websites&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;[@]&lt;/span&gt;&lt;span class=&quot;k&quot;&gt;}&lt;/span&gt;&lt;span class=&quot;s2&quot;&gt;&quot;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;do
+        &lt;/span&gt;&lt;span class=&quot;nb&quot;&gt;echo&lt;/span&gt; &lt;span class=&quot;s2&quot;&gt;&quot;Sending request to &lt;/span&gt;&lt;span class=&quot;nv&quot;&gt;$site&lt;/span&gt;&lt;span class=&quot;s2&quot;&gt; (iteration &lt;/span&gt;&lt;span class=&quot;nv&quot;&gt;$i&lt;/span&gt;&lt;span class=&quot;s2&quot;&gt;)&quot;&lt;/span&gt;
+        curl &lt;span class=&quot;nt&quot;&gt;-sS&lt;/span&gt; &lt;span class=&quot;s2&quot;&gt;&quot;&lt;/span&gt;&lt;span class=&quot;nv&quot;&gt;$site&lt;/span&gt;&lt;span class=&quot;s2&quot;&gt;&quot;&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;&amp;gt;&lt;/span&gt; /dev/null  &lt;span class=&quot;c&quot;&gt;# s for silent and S for showing errors if they occur.&lt;/span&gt;
+        &lt;span class=&quot;nb&quot;&gt;sleep &lt;/span&gt;1  &lt;span class=&quot;c&quot;&gt;# Wait for a second.&lt;/span&gt;
+        wget &lt;span class=&quot;nt&quot;&gt;-O-&lt;/span&gt; &lt;span class=&quot;s2&quot;&gt;&quot;&lt;/span&gt;&lt;span class=&quot;nv&quot;&gt;$site&lt;/span&gt;&lt;span class=&quot;s2&quot;&gt;&quot;&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;&amp;gt;&lt;/span&gt; /dev/null  &lt;span class=&quot;c&quot;&gt;# O- redirects output to stdout, as we don&apos;t want to save the file.&lt;/span&gt;
+
+    &lt;span class=&quot;k&quot;&gt;done
+done&lt;/span&gt;
+
+&lt;span class=&quot;c&quot;&gt;# Remove the traffic control rule.&lt;/span&gt;
+
+&lt;span class=&quot;nb&quot;&gt;sudo &lt;/span&gt;tc qdisc del dev eth0 root
+
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;Run the script, and you should be able to observe the effects on your Prometheus metrics. Remember to execute the script with appropriate permissions.&lt;/p&gt;
+
+&lt;h2 id=&quot;grab-a-coffee-reap-the-rewards&quot;&gt;Grab a coffee: Reap the Rewards&lt;/h2&gt;
+
+&lt;p&gt;Head over to your Prometheus interface and type tcp_retransmissions_total into the query bar. Switch to the graph view and marvel at the results of your hard work.&lt;/p&gt;
+
+&lt;p&gt;You’re now in a position to set up alerts for TCP retransmissions. A common benchmark to consider is that a retransmission rate of 2% or greater generally indicates network issues that warrant attention.&lt;/p&gt;
+
+&lt;p&gt;So grab a cup of coffee, sit back, and enjoy the fruit of your labour!&lt;/p&gt;
+
+&lt;p align=&quot;center&quot;&gt;
+&lt;img width=&quot;1510&quot; src=&quot;https://user-images.githubusercontent.com/2548160/273732219-e4b7bcf0-5d4a-456a-8197-543ecbcea061.png&quot; /&gt;
+&lt;/p&gt;
+
+&lt;h1 id=&quot;refs&quot;&gt;Refs&lt;/h1&gt;
+
+&lt;ul&gt;
+  &lt;li&gt;&lt;a href=&quot;https://www.man7.org/linux/man-pages/man2/bpf.2.html&quot;&gt;Must read - Linux Man Page&lt;/a&gt;&lt;/li&gt;
+  &lt;li&gt;&lt;a href=&quot;https://github.com/iovisor/bcc/blob/master/tools/tcpretrans_example.txt&quot;&gt;TCP retrans fields&lt;/a&gt;&lt;/li&gt;
+  &lt;li&gt;&lt;a href=&quot;https://facebookmicrosites.github.io/bpf/blog/2020/02/19/bpf-portability-and-co-re.html&quot;&gt;BPF CORE&lt;/a&gt;&lt;/li&gt;
+  &lt;li&gt;&lt;a href=&quot;https://www.brendangregg.com/blog/2018-03-22/tcp-tracepoints.html&quot;&gt;TCP tracepoints&lt;/a&gt;&lt;/li&gt;
+  &lt;li&gt;&lt;a href=&quot;https://ebpf.io/applications/&quot;&gt;eBPF applications&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+</description>
+                <pubDate>Thu, 12 Oct 2023 07:01:35 +0100</pubDate>
+                <link>http://localhost:4000/ebpf-net-viz</link>
+                <guid isPermaLink="true">http://localhost:4000/ebpf-net-viz</guid>
+                
+                <category>ebpf</category>
+                
+                <category>observability</category>
+                
+                
+                <category>Cloud Native</category>
+                
+            </item>
+        
+            <item>
+                <title>That which does not kill us makes us stronger</title>
+                <description>&lt;p&gt;Leverage agile frameworks to provide a robust synopsis for high level overviews. Iterative approaches to corporate strategy foster collaborative thinking to further the overall value proposition. Organically grow the holistic world view of disruptive innovation via workplace &lt;a href=&quot;https://unsplash.com/photos/u_6Zj2d1I5Q&quot;&gt;Andre Furtado&lt;/a&gt; diversity and empowerment.&lt;/p&gt;
+
+&lt;p&gt;Bring to the table win-win survival strategies to ensure proactive domination. At the end of the day, going forward, a new normal that has evolved from generation X is on the runway heading towards a streamlined cloud solution. User generated content in real-time will have multiple touchpoints for offshoring.&lt;/p&gt;
+
+&lt;h3 id=&quot;synergistically-evolve&quot;&gt;Synergistically evolve&lt;/h3&gt;
+
+&lt;p&gt;Podcasting operational change management inside of workflows to establish a framework. Taking seamless key performance indicators offline to maximise the long tail. Keeping your eye on the ball while performing a deep dive on the start-up mentality to derive convergence on cross-platform integration.&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/images/02-1.jpg#wide&quot; alt=&quot;Kitchen&quot; /&gt;
+&lt;em&gt;Photo by &lt;a href=&quot;https://unsplash.com/photos/u_6Zj2d1I5Q&quot;&gt;Andre Furtado&lt;/a&gt; on &lt;a href=&quot;https://unsplash.com/&quot;&gt;Unsplash&lt;/a&gt;&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;Leverage agile frameworks to provide a robust synopsis for high level overviews. Iterative approaches to corporate strategy foster collaborative thinking to further the overall value proposition. Organically grow the holistic world view of disruptive innovation via workplace diversity and empowerment.&lt;/p&gt;
+
+&lt;p&gt;Capitalize on low hanging fruit to identify a ballpark value added activity to beta test. Override the digital divide with additional clickthroughs from DevOps. Nanotechnology immersion along the information highway will close the loop on focusing solely on the bottom line.&lt;/p&gt;
+
+&lt;blockquote&gt;
+  &lt;p&gt;The longer I live, the more I realize that I am never wrong about anything, and that all the pains I have so humbly taken to verify my notions have only wasted my time!&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;Bring to the table win-win survival strategies to ensure proactive domination. At the end of the day, going forward, a new normal that has evolved from generation X is on the runway heading towards a streamlined cloud solution. User generated content in real-time will have multiple touchpoints for offshoring.&lt;/p&gt;
+
+&lt;p&gt;Phosfluorescently engage worldwide methodologies with web-enabled technology. Interactively coordinate proactive e-commerce via process-centric “outside the box” thinking. Completely pursue scalable customer service through sustainable &lt;a href=&quot;https://unsplash.com/photos/JJB_K8aCPU4&quot;&gt;Todd Quackenbush&lt;/a&gt; potentialities.&lt;/p&gt;
+
+&lt;h3 id=&quot;podcasting&quot;&gt;Podcasting&lt;/h3&gt;
+
+&lt;p&gt;Collaboratively administrate turnkey channels whereas virtual e-tailers. Objectively seize scalable metrics whereas proactive e-services. Seamlessly empower fully researched growth strategies and interoperable internal or “organic” sources.&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/images/02-2.jpg&quot; alt=&quot;Mountains&quot; /&gt;
+&lt;em&gt;Photo by &lt;a href=&quot;https://unsplash.com/photos/2IWxOWMVB6w&quot;&gt;Devon Hawkins&lt;/a&gt; on &lt;a href=&quot;https://unsplash.com/&quot;&gt;Unsplash&lt;/a&gt;&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;Completely synergize resource taxing relationships via premier niche markets. Professionally cultivate one-to-one customer service with robust ideas. Dynamically innovate resource-leveling customer service for state of the art customer service.&lt;/p&gt;
+
+&lt;p&gt;Globally incubate standards compliant channels before scalable benefits. Quickly disseminate superior deliverables whereas web-enabled applications. Quickly drive clicks-and-mortar catalysts for change before vertical architectures.&lt;/p&gt;
+
+&lt;p&gt;Credibly reintermediate backend ideas for cross-platform models. Continually reintermediate integrated processes through technically sound intellectual capital. Holistically foster superior methodologies without market-driven best practices.&lt;/p&gt;
+</description>
+                <pubDate>Sat, 14 Nov 2020 12:01:35 +0000</pubDate>
+                <link>http://localhost:4000/that-which-does-not-kill-us-makes-us-stronger</link>
+                <guid isPermaLink="true">http://localhost:4000/that-which-does-not-kill-us-makes-us-stronger</guid>
+                
+                <category>workflow</category>
+                
+                <category>hobby</category>
+                
+                <category>study</category>
+                
+                
+            </item>
+        
+            <item>
+                <title>Do what you can, with what you have, where you are</title>
+                <description>&lt;p&gt;Leverage agile frameworks to provide a robust synopsis for high level overviews. Iterative approaches to corporate strategy foster collaborative thinking to further the overall value proposition. Organically grow the holistic world view of disruptive innovation via workplace &lt;a href=&quot;https://unsplash.com/photos/AhiUnolb7cg&quot;&gt;Jared Rice&lt;/a&gt; diversity and empowerment.&lt;/p&gt;
+
+&lt;p&gt;Bring to the table win-win survival strategies to ensure proactive domination. At the end of the day, going forward, a new normal that has evolved from generation X is on the runway heading towards a streamlined cloud solution. User generated content in real-time will have multiple touchpoints for offshoring.&lt;/p&gt;
+
+&lt;h3 id=&quot;synergistically-evolve&quot;&gt;Synergistically evolve&lt;/h3&gt;
+
+&lt;p&gt;Podcasting operational change management inside of workflows to establish a framework. Taking seamless key performance indicators offline to maximise the long tail. Keeping your eye on the ball while performing a deep dive on the start-up mentality to derive convergence on cross-platform integration.&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/images/07-1.jpg#wide&quot; alt=&quot;House&quot; /&gt;
+&lt;em&gt;Photo by &lt;a href=&quot;https://unsplash.com/photos/AhiUnolb7cg&quot;&gt;Jared Rice&lt;/a&gt; on &lt;a href=&quot;https://unsplash.com/&quot;&gt;Unsplash&lt;/a&gt;&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;Leverage agile frameworks to provide a robust synopsis for high level overviews. Iterative approaches to corporate strategy foster collaborative thinking to further the overall value proposition. Organically grow the holistic world view of disruptive innovation via workplace diversity and empowerment.&lt;/p&gt;
+
+&lt;p&gt;Capitalize on low hanging fruit to identify a ballpark value added activity to beta test. Override the digital divide with additional clickthroughs from DevOps. Nanotechnology immersion along the information highway will close the loop on focusing solely on the bottom line.&lt;/p&gt;
+
+&lt;blockquote&gt;
+  &lt;p&gt;The longer I live, the more I realize that I am never wrong about anything, and that all the pains I have so humbly taken to verify my notions have only wasted my time!&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;Bring to the table win-win survival strategies to ensure proactive domination. At the end of the day, going forward, a new normal that has evolved from generation X is on the runway heading towards a streamlined cloud solution. User generated content in real-time will have multiple touchpoints for offshoring.&lt;/p&gt;
+
+&lt;p&gt;Phosfluorescently engage worldwide methodologies with web-enabled technology. Interactively coordinate proactive e-commerce via process-centric “outside the box” thinking. Completely pursue scalable customer service through sustainable &lt;a href=&quot;https://unsplash.com/photos/JJB_K8aCPU4&quot;&gt;Todd Quackenbush&lt;/a&gt; potentialities.&lt;/p&gt;
+
+&lt;h3 id=&quot;podcasting&quot;&gt;Podcasting&lt;/h3&gt;
+
+&lt;p&gt;Collaboratively administrate turnkey channels whereas virtual e-tailers. Objectively seize scalable metrics whereas proactive e-services. Seamlessly empower fully researched growth strategies and interoperable internal or “organic” sources.&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/images/07-2.jpg&quot; alt=&quot;Tree&quot; /&gt;
+&lt;em&gt;Photo by &lt;a href=&quot;https://unsplash.com/photos/_uqDYFkrmLM&quot;&gt;Angela Pham&lt;/a&gt; on &lt;a href=&quot;https://unsplash.com/&quot;&gt;Unsplash&lt;/a&gt;&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;Completely synergize resource taxing relationships via premier niche markets. Professionally cultivate one-to-one customer service with robust ideas. Dynamically innovate resource-leveling customer service for state of the art customer service.&lt;/p&gt;
+
+&lt;p&gt;Globally incubate standards compliant channels before scalable benefits. Quickly disseminate superior deliverables whereas web-enabled applications. Quickly drive clicks-and-mortar catalysts for change before vertical architectures.&lt;/p&gt;
+
+&lt;p&gt;Credibly reintermediate backend ideas for cross-platform models. Continually reintermediate integrated processes through technically sound intellectual capital. Holistically foster superior methodologies without market-driven best practices.&lt;/p&gt;
+</description>
+                <pubDate>Thu, 12 Nov 2020 12:01:35 +0000</pubDate>
+                <link>http://localhost:4000/do-what-you-can-with-what-you-have-where-you-are</link>
+                <guid isPermaLink="true">http://localhost:4000/do-what-you-can-with-what-you-have-where-you-are</guid>
+                
+                <category>lifestyle</category>
+                
+                <category>travel</category>
+                
+                <category>story</category>
+                
+                
+            </item>
+        
+            <item>
+                <title>If you cannot do great things, do small things in a great way</title>
+                <description>&lt;p&gt;Leverage agile frameworks to provide a robust synopsis for high level overviews. Iterative approaches to corporate strategy foster collaborative thinking to further the overall value proposition. Organically grow the holistic world view of disruptive innovation via workplace &lt;a href=&quot;https://unsplash.com/photos/A5rCN8626Ck&quot;&gt;Dino Reichmuth&lt;/a&gt; diversity and empowerment.&lt;/p&gt;
+
+&lt;p&gt;Bring to the table win-win survival strategies to ensure proactive domination. At the end of the day, going forward, a new normal that has evolved from generation X is on the runway heading towards a streamlined cloud solution. User generated content in real-time will have multiple touchpoints for offshoring.&lt;/p&gt;
+
+&lt;h3 id=&quot;synergistically-evolve&quot;&gt;Synergistically evolve&lt;/h3&gt;
+
+&lt;p&gt;Podcasting operational change management inside of workflows to establish a framework. Taking seamless key performance indicators offline to maximise the long tail. Keeping your eye on the ball while performing a deep dive on the start-up mentality to derive convergence on cross-platform integration.&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/images/04-1.jpg#wide&quot; alt=&quot;House&quot; /&gt;
+&lt;em&gt;Photo by &lt;a href=&quot;https://unsplash.com/photos/A5rCN8626Ck&quot;&gt;Dino Reichmuth&lt;/a&gt; on &lt;a href=&quot;https://unsplash.com/&quot;&gt;Unsplash&lt;/a&gt;&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;Leverage agile frameworks to provide a robust synopsis for high level overviews. Iterative approaches to corporate strategy foster collaborative thinking to further the overall value proposition. Organically grow the holistic world view of disruptive innovation via workplace diversity and empowerment.&lt;/p&gt;
+
+&lt;p&gt;Capitalize on low hanging fruit to identify a ballpark value added activity to beta test. Override the digital divide with additional clickthroughs from DevOps. Nanotechnology immersion along the information highway will close the loop on focusing solely on the bottom line.&lt;/p&gt;
+
+&lt;blockquote&gt;
+  &lt;p&gt;The longer I live, the more I realize that I am never wrong about anything, and that all the pains I have so humbly taken to verify my notions have only wasted my time!&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;Bring to the table win-win survival strategies to ensure proactive domination. At the end of the day, going forward, a new normal that has evolved from generation X is on the runway heading towards a streamlined cloud solution. User generated content in real-time will have multiple touchpoints for offshoring.&lt;/p&gt;
+
+&lt;p&gt;Phosfluorescently engage worldwide methodologies with web-enabled technology. Interactively coordinate proactive e-commerce via process-centric “outside the box” thinking. Completely pursue scalable customer service through sustainable &lt;a href=&quot;https://unsplash.com/photos/WTrApnUJWho&quot;&gt;Charis Sims&lt;/a&gt; potentialities.&lt;/p&gt;
+
+&lt;h3 id=&quot;podcasting&quot;&gt;Podcasting&lt;/h3&gt;
+
+&lt;p&gt;Collaboratively administrate turnkey channels whereas virtual e-tailers. Objectively seize scalable metrics whereas proactive e-services. Seamlessly empower fully researched growth strategies and interoperable internal or “organic” sources.&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/images/04-2.jpg&quot; alt=&quot;Tree&quot; /&gt;
+&lt;em&gt;Photo by &lt;a href=&quot;https://unsplash.com/photos/WTrApnUJWho&quot;&gt;Charis Sims&lt;/a&gt; on &lt;a href=&quot;https://unsplash.com/&quot;&gt;Unsplash&lt;/a&gt;&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;Completely synergize resource taxing relationships via premier niche markets. Professionally cultivate one-to-one customer service with robust ideas. Dynamically innovate resource-leveling customer service for state of the art customer service.&lt;/p&gt;
+
+&lt;p&gt;Globally incubate standards compliant channels before scalable benefits. Quickly disseminate superior deliverables whereas web-enabled applications. Quickly drive clicks-and-mortar catalysts for change before vertical architectures.&lt;/p&gt;
+
+&lt;p&gt;Credibly reintermediate backend ideas for cross-platform models. Continually reintermediate integrated processes through technically sound intellectual capital. Holistically foster superior methodologies without market-driven best practices.&lt;/p&gt;
+</description>
+                <pubDate>Wed, 11 Nov 2020 12:01:35 +0000</pubDate>
+                <link>http://localhost:4000/if-you-cannot-do-great-things-do-small-things-in-a-great-way</link>
+                <guid isPermaLink="true">http://localhost:4000/if-you-cannot-do-great-things-do-small-things-in-a-great-way</guid>
+                
+                <category>lifestyle</category>
+                
+                <category>rest</category>
+                
+                <category>notes</category>
+                
+                
+            </item>
+        
+            <item>
+                <title>Strive not to be a success, but rather to be of value</title>
+                <description>&lt;p&gt;Leverage agile frameworks to provide a robust synopsis for high level overviews. Iterative approaches to corporate strategy foster collaborative thinking to further the overall value proposition. Organically grow the holistic world view of disruptive innovation via workplace &lt;a href=&quot;https://unsplash.com/photos/QRU0i5AqEJA&quot;&gt;Colton Duke&lt;/a&gt; diversity and empowerment.&lt;/p&gt;
+
+&lt;p&gt;Bring to the table win-win survival strategies to ensure proactive domination. At the end of the day, going forward, a new normal that has evolved from generation X is on the runway heading towards a streamlined cloud solution. User generated content in real-time will have multiple touchpoints for offshoring.&lt;/p&gt;
+
+&lt;h3 id=&quot;synergistically-evolve&quot;&gt;Synergistically evolve&lt;/h3&gt;
+
+&lt;p&gt;Podcasting operational change management inside of workflows to establish a framework. Taking seamless key performance indicators offline to maximise the long tail. Keeping your eye on the ball while performing a deep dive on the start-up mentality to derive convergence on cross-platform integration.&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/images/09-1.jpg#wide&quot; alt=&quot;House&quot; /&gt;
+&lt;em&gt;Photo by &lt;a href=&quot;https://unsplash.com/photos/QRU0i5AqEJA&quot;&gt;Colton Duke&lt;/a&gt; on &lt;a href=&quot;https://unsplash.com/&quot;&gt;Unsplash&lt;/a&gt;&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;Leverage agile frameworks to provide a robust synopsis for high level overviews. Iterative approaches to corporate strategy foster collaborative thinking to further the overall value proposition. Organically grow the holistic world view of disruptive innovation via workplace diversity and empowerment.&lt;/p&gt;
+
+&lt;p&gt;Capitalize on low hanging fruit to identify a ballpark value added activity to beta test. Override the digital divide with additional clickthroughs from DevOps. Nanotechnology immersion along the information highway will close the loop on focusing solely on the bottom line.&lt;/p&gt;
+
+&lt;blockquote&gt;
+  &lt;p&gt;The longer I live, the more I realize that I am never wrong about anything, and that all the pains I have so humbly taken to verify my notions have only wasted my time!&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;Bring to the table win-win survival strategies to ensure proactive domination. At the end of the day, going forward, a new normal that has evolved from generation X is on the runway heading towards a streamlined cloud solution. User generated content in real-time will have multiple touchpoints for offshoring.&lt;/p&gt;
+
+&lt;p&gt;Phosfluorescently engage worldwide methodologies with web-enabled technology. Interactively coordinate proactive e-commerce via process-centric “outside the box” thinking. Completely pursue scalable customer service through sustainable &lt;a href=&quot;https://unsplash.com/photos/RwHv7LgeC7s&quot;&gt;Johannes Plenio&lt;/a&gt; potentialities.&lt;/p&gt;
+
+&lt;h3 id=&quot;podcasting&quot;&gt;Podcasting&lt;/h3&gt;
+
+&lt;p&gt;Collaboratively administrate turnkey channels whereas virtual e-tailers. Objectively seize scalable metrics whereas proactive e-services. Seamlessly empower fully researched growth strategies and interoperable internal or “organic” sources.&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/images/09-2.jpg&quot; alt=&quot;Tree&quot; /&gt;
+&lt;em&gt;Photo by &lt;a href=&quot;https://unsplash.com/photos/RwHv7LgeC7s&quot;&gt;Johannes Plenio&lt;/a&gt; on &lt;a href=&quot;https://unsplash.com/&quot;&gt;Unsplash&lt;/a&gt;&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;Completely synergize resource taxing relationships via premier niche markets. Professionally cultivate one-to-one customer service with robust ideas. Dynamically innovate resource-leveling customer service for state of the art customer service.&lt;/p&gt;
+
+&lt;p&gt;Globally incubate standards compliant channels before scalable benefits. Quickly disseminate superior deliverables whereas web-enabled applications. Quickly drive clicks-and-mortar catalysts for change before vertical architectures.&lt;/p&gt;
+
+&lt;p&gt;Credibly reintermediate backend ideas for cross-platform models. Continually reintermediate integrated processes through technically sound intellectual capital. Holistically foster superior methodologies without market-driven best practices.&lt;/p&gt;
+</description>
+                <pubDate>Tue, 10 Nov 2020 12:01:35 +0000</pubDate>
+                <link>http://localhost:4000/strive-not-to-be-a-success-but-rather-to-be-of-value</link>
+                <guid isPermaLink="true">http://localhost:4000/strive-not-to-be-a-success-but-rather-to-be-of-value</guid>
+                
+                <category>technology</category>
+                
+                <category>workflow</category>
+                
+                <category>story</category>
+                
+                
+            </item>
+        
+            <item>
+                <title>A journey of a thousand leagues begins beneath one’s feet</title>
+                <description>&lt;p&gt;Leverage agile frameworks to provide a robust synopsis for high level overviews. Iterative approaches to corporate strategy foster collaborative thinking to further the overall value proposition. Organically grow the holistic world view of disruptive innovation via workplace &lt;a href=&quot;https://unsplash.com/photos/phIFdC6lA4E&quot;&gt;Benjamin Voros&lt;/a&gt; diversity and empowerment.&lt;/p&gt;
+
+&lt;p&gt;Bring to the table win-win survival strategies to ensure proactive domination. At the end of the day, going forward, a new normal that has evolved from generation X is on the runway heading towards a streamlined cloud solution. User generated content in real-time will have multiple touchpoints for offshoring.&lt;/p&gt;
+
+&lt;h3 id=&quot;synergistically-evolve&quot;&gt;Synergistically evolve&lt;/h3&gt;
+
+&lt;p&gt;Podcasting operational change management inside of workflows to establish a framework. Taking seamless key performance indicators offline to maximise the long tail. Keeping your eye on the ball while performing a deep dive on the start-up mentality to derive convergence on cross-platform integration.&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/images/06-1.jpg#wide&quot; alt=&quot;Space&quot; /&gt;
+&lt;em&gt;Photo by &lt;a href=&quot;https://unsplash.com/photos/phIFdC6lA4E&quot;&gt;Benjamin Voros&lt;/a&gt; on &lt;a href=&quot;https://unsplash.com/&quot;&gt;Unsplash&lt;/a&gt;&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;Leverage agile frameworks to provide a robust synopsis for high level overviews. Iterative approaches to corporate strategy foster collaborative thinking to further the overall value proposition. Organically grow the holistic world view of disruptive innovation via workplace diversity and empowerment.&lt;/p&gt;
+
+&lt;p&gt;Capitalize on low hanging fruit to identify a ballpark value added activity to beta test. Override the digital divide with additional clickthroughs from DevOps. Nanotechnology immersion along the information highway will close the loop on focusing solely on the bottom line.&lt;/p&gt;
+
+&lt;blockquote&gt;
+  &lt;p&gt;The longer I live, the more I realize that I am never wrong about anything, and that all the pains I have so humbly taken to verify my notions have only wasted my time!&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;Bring to the table win-win survival strategies to ensure proactive domination. At the end of the day, going forward, a new normal that has evolved from generation X is on the runway heading towards a streamlined cloud solution. User generated content in real-time will have multiple touchpoints for offshoring.&lt;/p&gt;
+
+&lt;p&gt;Phosfluorescently engage worldwide methodologies with web-enabled technology. Interactively coordinate proactive e-commerce via process-centric “outside the box” thinking. Completely pursue scalable customer service through sustainable &lt;a href=&quot;https://unsplash.com/photos/vaPoJZB9Mzg&quot;&gt;Oleg Chursin&lt;/a&gt; potentialities.&lt;/p&gt;
+
+&lt;h3 id=&quot;podcasting&quot;&gt;Podcasting&lt;/h3&gt;
+
+&lt;p&gt;Collaboratively administrate turnkey channels whereas virtual e-tailers. Objectively seize scalable metrics whereas proactive e-services. Seamlessly empower fully researched growth strategies and interoperable internal or “organic” sources.&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/images/06-2.jpg&quot; alt=&quot;Mountains&quot; /&gt;
+&lt;em&gt;Photo by &lt;a href=&quot;https://unsplash.com/photos/vaPoJZB9Mzg&quot;&gt;Oleg Chursin&lt;/a&gt; on &lt;a href=&quot;https://unsplash.com/&quot;&gt;Unsplash&lt;/a&gt;&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;Completely synergize resource taxing relationships via premier niche markets. Professionally cultivate one-to-one customer service with robust ideas. Dynamically innovate resource-leveling customer service for state of the art customer service.&lt;/p&gt;
+
+&lt;p&gt;Globally incubate standards compliant channels before scalable benefits. Quickly disseminate superior deliverables whereas web-enabled applications. Quickly drive clicks-and-mortar catalysts for change before vertical architectures.&lt;/p&gt;
+
+&lt;p&gt;Credibly reintermediate backend ideas for cross-platform models. Continually reintermediate integrated processes through technically sound intellectual capital. Holistically foster superior methodologies without market-driven best practices.&lt;/p&gt;
+</description>
+                <pubDate>Mon, 09 Nov 2020 12:01:35 +0000</pubDate>
+                <link>http://localhost:4000/a-journey-of-a-thousand-leagues-begins-beneath-one-s-feet</link>
+                <guid isPermaLink="true">http://localhost:4000/a-journey-of-a-thousand-leagues-begins-beneath-one-s-feet</guid>
+                
+                <category>travel</category>
+                
+                <category>story</category>
+                
+                <category>rest</category>
+                
+                
+            </item>
+        
+            <item>
+                <title>Life shrinks or expands in proportion to one’s courage</title>
+                <description>&lt;p&gt;Leverage agile frameworks to provide a robust synopsis for high level overviews. Iterative approaches to corporate strategy foster collaborative thinking to further the overall value proposition. Organically grow the holistic world view of disruptive innovation via workplace &lt;a href=&quot;https://unsplash.com/photos/gUK3lA3K7Yo&quot;&gt;John Matychuk&lt;/a&gt; diversity and empowerment.&lt;/p&gt;
+
+&lt;p&gt;Bring to the table win-win survival strategies to ensure proactive domination. At the end of the day, going forward, a new normal that has evolved from generation X is on the runway heading towards a streamlined cloud solution. User generated content in real-time will have multiple touchpoints for offshoring.&lt;/p&gt;
+
+&lt;h3 id=&quot;synergistically-evolve&quot;&gt;Synergistically evolve&lt;/h3&gt;
+
+&lt;p&gt;Podcasting operational change management inside of workflows to establish a framework. Taking seamless key performance indicators offline to maximise the long tail. Keeping your eye on the ball while performing a deep dive on the start-up mentality to derive convergence on cross-platform integration.&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/images/03-1.jpg#wide&quot; alt=&quot;Space&quot; /&gt;
+&lt;em&gt;Photo by &lt;a href=&quot;https://unsplash.com/photos/gUK3lA3K7Yo&quot;&gt;John Matychuk&lt;/a&gt; on &lt;a href=&quot;https://unsplash.com/&quot;&gt;Unsplash&lt;/a&gt;&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;Leverage agile frameworks to provide a robust synopsis for high level overviews. Iterative approaches to corporate strategy foster collaborative thinking to further the overall value proposition. Organically grow the holistic world view of disruptive innovation via workplace diversity and empowerment.&lt;/p&gt;
+
+&lt;p&gt;Capitalize on low hanging fruit to identify a ballpark value added activity to beta test. Override the digital divide with additional clickthroughs from DevOps. Nanotechnology immersion along the information highway will close the loop on focusing solely on the bottom line.&lt;/p&gt;
+
+&lt;blockquote&gt;
+  &lt;p&gt;The longer I live, the more I realize that I am never wrong about anything, and that all the pains I have so humbly taken to verify my notions have only wasted my time!&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;Bring to the table win-win survival strategies to ensure proactive domination. At the end of the day, going forward, a new normal that has evolved from generation X is on the runway heading towards a streamlined cloud solution. User generated content in real-time will have multiple touchpoints for offshoring.&lt;/p&gt;
+
+&lt;p&gt;Phosfluorescently engage worldwide methodologies with web-enabled technology. Interactively coordinate proactive e-commerce via process-centric “outside the box” thinking. Completely pursue scalable customer service through sustainable &lt;a href=&quot;https://unsplash.com/photos/tP7fvu08uEk&quot;&gt;Jamie Street&lt;/a&gt; potentialities.&lt;/p&gt;
+
+&lt;h3 id=&quot;podcasting&quot;&gt;Podcasting&lt;/h3&gt;
+
+&lt;p&gt;Collaboratively administrate turnkey channels whereas virtual e-tailers. Objectively seize scalable metrics whereas proactive e-services. Seamlessly empower fully researched growth strategies and interoperable internal or “organic” sources.&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/images/03-2.jpg&quot; alt=&quot;Trees&quot; /&gt;
+&lt;em&gt;Photo by &lt;a href=&quot;https://unsplash.com/photos/tP7fvu08uEk&quot;&gt;Jamie Street&lt;/a&gt; on &lt;a href=&quot;https://unsplash.com/&quot;&gt;Unsplash&lt;/a&gt;&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;Completely synergize resource taxing relationships via premier niche markets. Professionally cultivate one-to-one customer service with robust ideas. Dynamically innovate resource-leveling customer service for state of the art customer service.&lt;/p&gt;
+
+&lt;p&gt;Globally incubate standards compliant channels before scalable benefits. Quickly disseminate superior deliverables whereas web-enabled applications. Quickly drive clicks-and-mortar catalysts for change before vertical architectures.&lt;/p&gt;
+
+&lt;p&gt;Credibly reintermediate backend ideas for cross-platform models. Continually reintermediate integrated processes through technically sound intellectual capital. Holistically foster superior methodologies without market-driven best practices.&lt;/p&gt;
+</description>
+                <pubDate>Sun, 08 Nov 2020 12:01:35 +0000</pubDate>
+                <link>http://localhost:4000/life-shrinks-or-expands-in-proportion-to-one-s-courage</link>
+                <guid isPermaLink="true">http://localhost:4000/life-shrinks-or-expands-in-proportion-to-one-s-courage</guid>
+                
+                <category>notes</category>
+                
+                <category>technology</category>
+                
+                
+            </item>
+        
+            <item>
+                <title>What you do speaks so loudly that I cannot hear what you say</title>
+                <description>&lt;p&gt;Leverage agile frameworks to provide a robust synopsis for high level overviews. Iterative approaches to corporate strategy foster collaborative thinking to further the overall value proposition. Organically grow the holistic world view of disruptive innovation via workplace &lt;a href=&quot;https://unsplash.com/photos/ag51iExrb0U&quot;&gt;Sam Bark&lt;/a&gt; diversity and empowerment.&lt;/p&gt;
+
+&lt;p&gt;Bring to the table win-win survival strategies to ensure proactive domination. At the end of the day, going forward, a new normal that has evolved from generation X is on the runway heading towards a streamlined cloud solution. User generated content in real-time will have multiple touchpoints for offshoring.&lt;/p&gt;
+
+&lt;h3 id=&quot;synergistically-evolve&quot;&gt;Synergistically evolve&lt;/h3&gt;
+
+&lt;p&gt;Podcasting operational change management inside of workflows to establish a framework. Taking seamless key performance indicators offline to maximise the long tail. Keeping your eye on the ball while performing a deep dive on the start-up mentality to derive convergence on cross-platform integration.&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/images/08-1.jpg#wide&quot; alt=&quot;Winter&quot; /&gt;
+&lt;em&gt;Photo by &lt;a href=&quot;https://unsplash.com/photos/ag51iExrb0U&quot;&gt;Sam Bark&lt;/a&gt; on &lt;a href=&quot;https://unsplash.com/&quot;&gt;Unsplash&lt;/a&gt;&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;Leverage agile frameworks to provide a robust synopsis for high level overviews. Iterative approaches to corporate strategy foster collaborative thinking to further the overall value proposition. Organically grow the holistic world view of disruptive innovation via workplace diversity and empowerment.&lt;/p&gt;
+
+&lt;p&gt;Capitalize on low hanging fruit to identify a ballpark value added activity to beta test. Override the digital divide with additional clickthroughs from DevOps. Nanotechnology immersion along the information highway will close the loop on focusing solely on the bottom line.&lt;/p&gt;
+
+&lt;blockquote&gt;
+  &lt;p&gt;The longer I live, the more I realize that I am never wrong about anything, and that all the pains I have so humbly taken to verify my notions have only wasted my time!&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;Bring to the table win-win survival strategies to ensure proactive domination. At the end of the day, going forward, a new normal that has evolved from generation X is on the runway heading towards a streamlined cloud solution. User generated content in real-time will have multiple touchpoints for offshoring.&lt;/p&gt;
+
+&lt;p&gt;Phosfluorescently engage worldwide methodologies with web-enabled technology. Interactively coordinate proactive e-commerce via process-centric “outside the box” thinking. Completely pursue scalable customer service through sustainable &lt;a href=&quot;https://unsplash.com/@samuelbarkos&quot;&gt;Sam Bark&lt;/a&gt; potentialities.&lt;/p&gt;
+
+&lt;h3 id=&quot;podcasting&quot;&gt;Podcasting&lt;/h3&gt;
+
+&lt;p&gt;Collaboratively administrate turnkey channels whereas virtual e-tailers. Objectively seize scalable metrics whereas proactive e-services. Seamlessly empower fully researched growth strategies and interoperable internal or “organic” sources.&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/images/08-2.jpg&quot; alt=&quot;Trees&quot; /&gt;
+&lt;em&gt;Photo by &lt;a href=&quot;https://unsplash.com/@samuelbarkos&quot;&gt;Sam Bark&lt;/a&gt; on &lt;a href=&quot;https://unsplash.com/&quot;&gt;Unsplash&lt;/a&gt;&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;Completely synergize resource taxing relationships via premier niche markets. Professionally cultivate one-to-one customer service with robust ideas. Dynamically innovate resource-leveling customer service for state of the art customer service.&lt;/p&gt;
+
+&lt;p&gt;Globally incubate standards compliant channels before scalable benefits. Quickly disseminate superior deliverables whereas web-enabled applications. Quickly drive clicks-and-mortar catalysts for change before vertical architectures.&lt;/p&gt;
+
+&lt;p&gt;Credibly reintermediate backend ideas for cross-platform models. Continually reintermediate integrated processes through technically sound intellectual capital. Holistically foster superior methodologies without market-driven best practices.&lt;/p&gt;
+</description>
+                <pubDate>Sat, 07 Nov 2020 12:01:35 +0000</pubDate>
+                <link>http://localhost:4000/what-you-do-speaks-so-loudly-that-I-cannot-hear-what-you-say</link>
+                <guid isPermaLink="true">http://localhost:4000/what-you-do-speaks-so-loudly-that-I-cannot-hear-what-you-say</guid>
+                
+                <category>travel</category>
+                
+                <category>hobby</category>
+                
+                <category>notes</category>
+                
+                
+            </item>
+        
+            <item>
+                <title>You must be the change you wish to see in the world</title>
+                <description>&lt;p&gt;Leverage agile frameworks to provide a robust synopsis for high level overviews. Iterative approaches to corporate strategy foster collaborative thinking to further the overall value proposition. Organically grow the holistic world view of disruptive innovation via workplace &lt;a href=&quot;https://unsplash.com/photos/Tc3c8ZDIbxw&quot;&gt;Andrew Wulf&lt;/a&gt; diversity and empowerment.&lt;/p&gt;
+
+&lt;p&gt;Bring to the table win-win survival strategies to ensure proactive domination. At the end of the day, going forward, a new normal that has evolved from generation X is on the runway heading towards a streamlined cloud solution. User generated content in real-time will have multiple touchpoints for offshoring.&lt;/p&gt;
+
+&lt;h3 id=&quot;synergistically-evolve&quot;&gt;Synergistically evolve&lt;/h3&gt;
+
+&lt;p&gt;Podcasting operational change management inside of workflows to establish a framework. Taking seamless key performance indicators offline to maximise the long tail. Keeping your eye on the ball while performing a deep dive on the start-up mentality to derive convergence on cross-platform integration.&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/images/05-1.jpg#wide&quot; alt=&quot;City&quot; /&gt;
+&lt;em&gt;Photo by &lt;a href=&quot;https://unsplash.com/photos/Tc3c8ZDIbxw&quot;&gt;Andrew Wulf&lt;/a&gt; on &lt;a href=&quot;https://unsplash.com/&quot;&gt;Unsplash&lt;/a&gt;&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;Leverage agile frameworks to provide a robust synopsis for high level overviews. Iterative approaches to corporate strategy foster collaborative thinking to further the overall value proposition. Organically grow the holistic world view of disruptive innovation via workplace diversity and empowerment.&lt;/p&gt;
+
+&lt;p&gt;Capitalize on low hanging fruit to identify a ballpark value added activity to beta test. Override the digital divide with additional clickthroughs from DevOps. Nanotechnology immersion along the information highway will close the loop on focusing solely on the bottom line.&lt;/p&gt;
+
+&lt;blockquote&gt;
+  &lt;p&gt;The longer I live, the more I realize that I am never wrong about anything, and that all the pains I have so humbly taken to verify my notions have only wasted my time!&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;Bring to the table win-win survival strategies to ensure proactive domination. At the end of the day, going forward, a new normal that has evolved from generation X is on the runway heading towards a streamlined cloud solution. User generated content in real-time will have multiple touchpoints for offshoring.&lt;/p&gt;
+
+&lt;p&gt;Phosfluorescently engage worldwide methodologies with web-enabled technology. Interactively coordinate proactive e-commerce via process-centric “outside the box” thinking. Completely pursue scalable customer service through sustainable &lt;a href=&quot;https://unsplash.com/photos/10py7Mvmf1g&quot;&gt;Ken Cheung&lt;/a&gt; potentialities.&lt;/p&gt;
+
+&lt;h3 id=&quot;podcasting&quot;&gt;Podcasting&lt;/h3&gt;
+
+&lt;p&gt;Collaboratively administrate turnkey channels whereas virtual e-tailers. Objectively seize scalable metrics whereas proactive e-services. Seamlessly empower fully researched growth strategies and interoperable internal or “organic” sources.&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/images/05-2.jpg&quot; alt=&quot;City&quot; /&gt;
+&lt;em&gt;Photo by &lt;a href=&quot;https://unsplash.com/photos/10py7Mvmf1g&quot;&gt;Ken Cheung&lt;/a&gt; on &lt;a href=&quot;https://unsplash.com/&quot;&gt;Unsplash&lt;/a&gt;&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;Completely synergize resource taxing relationships via premier niche markets. Professionally cultivate one-to-one customer service with robust ideas. Dynamically innovate resource-leveling customer service for state of the art customer service.&lt;/p&gt;
+
+&lt;p&gt;Globally incubate standards compliant channels before scalable benefits. Quickly disseminate superior deliverables whereas web-enabled applications. Quickly drive clicks-and-mortar catalysts for change before vertical architectures.&lt;/p&gt;
+
+&lt;p&gt;Credibly reintermediate backend ideas for cross-platform models. Continually reintermediate integrated processes through technically sound intellectual capital. Holistically foster superior methodologies without market-driven best practices.&lt;/p&gt;
+</description>
+                <pubDate>Fri, 06 Nov 2020 12:01:35 +0000</pubDate>
+                <link>http://localhost:4000/you-must-be-the-change-you-wish-to-see-in-the-world</link>
+                <guid isPermaLink="true">http://localhost:4000/you-must-be-the-change-you-wish-to-see-in-the-world</guid>
+                
+                <category>workflow</category>
+                
+                <category>hobby</category>
+                
+                
+            </item>
+        
+            <item>
+                <title>The way I see it, every life is a pile of good things</title>
+                <description>&lt;p&gt;Leverage agile frameworks to provide a robust synopsis for high level overviews. Iterative approaches to corporate strategy foster collaborative thinking to further the overall value proposition. Organically grow the holistic world view of disruptive innovation via workplace &lt;a href=&quot;https://unsplash.com/photos/j5qpdhh23GI&quot;&gt;Steven Aguilar&lt;/a&gt; diversity and empowerment.&lt;/p&gt;
+
+&lt;p&gt;Bring to the table win-win survival strategies to ensure proactive domination. At the end of the day, going forward, a new normal that has evolved from generation X is on the runway heading towards a streamlined cloud solution. User generated content in real-time will have multiple touchpoints for offshoring.&lt;/p&gt;
+
+&lt;h3 id=&quot;synergistically-evolve&quot;&gt;Synergistically evolve&lt;/h3&gt;
+
+&lt;p&gt;Podcasting operational change management inside of workflows to establish a framework. Taking seamless key performance indicators offline to maximise the long tail. Keeping your eye on the ball while performing a deep dive on the start-up mentality to derive convergence on cross-platform integration.&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/images/11-1.jpg#wide&quot; alt=&quot;City&quot; /&gt;
+&lt;em&gt;Photo by &lt;a href=&quot;https://unsplash.com/photos/j5qpdhh23GI&quot;&gt;Steven Aguilar&lt;/a&gt; on &lt;a href=&quot;https://unsplash.com/&quot;&gt;Unsplash&lt;/a&gt;&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;Leverage agile frameworks to provide a robust synopsis for high level overviews. Iterative approaches to corporate strategy foster collaborative thinking to further the overall value proposition. Organically grow the holistic world view of disruptive innovation via workplace diversity and empowerment.&lt;/p&gt;
+
+&lt;p&gt;Capitalize on low hanging fruit to identify a ballpark value added activity to beta test. Override the digital divide with additional clickthroughs from DevOps. Nanotechnology immersion along the information highway will close the loop on focusing solely on the bottom line.&lt;/p&gt;
+
+&lt;blockquote&gt;
+  &lt;p&gt;The longer I live, the more I realize that I am never wrong about anything, and that all the pains I have so humbly taken to verify my notions have only wasted my time!&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;Bring to the table win-win survival strategies to ensure proactive domination. At the end of the day, going forward, a new normal that has evolved from generation X is on the runway heading towards a streamlined cloud solution. User generated content in real-time will have multiple touchpoints for offshoring.&lt;/p&gt;
+
+&lt;p&gt;Phosfluorescently engage worldwide methodologies with web-enabled technology. Interactively coordinate proactive e-commerce via process-centric “outside the box” thinking. Completely pursue scalable customer service through sustainable &lt;a href=&quot;https://unsplash.com/photos/ej01HfLfzOE&quot;&gt;Steven Aguilar&lt;/a&gt; potentialities.&lt;/p&gt;
+
+&lt;h3 id=&quot;podcasting&quot;&gt;Podcasting&lt;/h3&gt;
+
+&lt;p&gt;Collaboratively administrate turnkey channels whereas virtual e-tailers. Objectively seize scalable metrics whereas proactive e-services. Seamlessly empower fully researched growth strategies and interoperable internal or “organic” sources.&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/images/11-2.jpg&quot; alt=&quot;Car&quot; /&gt;
+&lt;em&gt;Photo by &lt;a href=&quot;https://unsplash.com/photos/ej01HfLfzOE&quot;&gt;Steven Aguilar&lt;/a&gt; on &lt;a href=&quot;https://unsplash.com/&quot;&gt;Unsplash&lt;/a&gt;&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;Completely synergize resource taxing relationships via premier niche markets. Professionally cultivate one-to-one customer service with robust ideas. Dynamically innovate resource-leveling customer service for state of the art customer service.&lt;/p&gt;
+
+&lt;p&gt;Globally incubate standards compliant channels before scalable benefits. Quickly disseminate superior deliverables whereas web-enabled applications. Quickly drive clicks-and-mortar catalysts for change before vertical architectures.&lt;/p&gt;
+
+&lt;p&gt;Credibly reintermediate backend ideas for cross-platform models. Continually reintermediate integrated processes through technically sound intellectual capital. Holistically foster superior methodologies without market-driven best practices.&lt;/p&gt;
+</description>
+                <pubDate>Sat, 31 Oct 2020 12:01:35 +0000</pubDate>
+                <link>http://localhost:4000/the-way-i-see-it-every-life-is-a-pile-of-good-things</link>
+                <guid isPermaLink="true">http://localhost:4000/the-way-i-see-it-every-life-is-a-pile-of-good-things</guid>
+                
+                <category>lifestyle</category>
+                
+                <category>fashion</category>
+                
+                <category>study</category>
+                
+                
+            </item>
+        
+    </channel>
+</rss>
