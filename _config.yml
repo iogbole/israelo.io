@@ -27,7 +27,7 @@ social:
 # Hero Settings
 hero:
   hero__title: Hey, I’m Israel Ogbole
-  hero__description: I use this space to share personal thoughts and experiences with Open Source Software, Raspberry Pi, Cloud-native technologies, and life in general. <br> Also, I will journal Naomi's programming journey here. Naomi is my nine-year-old daughter who loves coding.
+  hero__description: Welcome to israelo.io. Holding an MBA in Data Analytics and with over 7 years steeped in the cloud-native observability domain, I've become a trusted voice in observability product management and strategy. Here, you'll find a deep dive into my insights on DevOps, Raspberry Pi, Cloud-native technologies, and life in its varied hues. <br> Additionally, I chronicle the programming adventures of Naomi, my nine-year-old daughter who harbours a love for coding. Delve into my expertise on eBPF, OpenTelemetry, and ML/AIOps. 
   hero__image: "/images/01.jpg"
 
 #-------------------------------
