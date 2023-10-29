@@ -2,34 +2,38 @@
 layout: page
 title: About
 permalink: /about/
-image: '/images/01-2.jpg'
+image: 'https://user-images.githubusercontent.com/2548160/278883116-1e5ec95c-7e32-4de7-9f36-2a57c8a4d1f7.png'
 ---
 
-Leverage agile frameworks to provide a robust Hugo Sousa synopsis for high level overviews. Iterative approaches to corporate strategy foster collaborative thinking to further the overall value proposition. Organically grow the holistic world view of disruptive innovation via workplace diversity and empowerment.
+I am a product leader with over 7 years of experience in the cloud-native observability sector, bringing a rich background in software engineering and architecture. Driven by customer-centricity and continuous innovation, I thrive on creating products that resonate deeply with users. Over the past year, I've championed three key product initiatives from inception to GA, achieving a notable reduction in churn and a significant increase in Annual Revenue.
 
-Bring to the table win-win survival strategies to ensure proactive domination. At the end of the day, going forward, a new normal that has evolved from generation X is on the runway heading towards a streamlined cloud solution. User generated content in real-time will have multiple touchpoints for offshoring.
+Currently leading product efforts at Elastic, I collaborate with a talented and globally distributed team spanning engineering, UX, and marketing, as we navigate the intricate terrains of product discovery, design, and development. My role is accentuated by my passion for cloud-native technologies, backed by a unique blend of leadership, technical proficiency, and analytical prowess. As a tech enthusiast who transitioned into product management, I embody the 'techie-turned-PM' philosophy.
 
-Collaboratively administrate turnkey channels whereas virtual e-tailers. Objectively seize scalable metrics whereas proactive e-services. Seamlessly empower fully researched growth strategies and interoperable internal or “organic” sources.
+For those keen on engaging with a seasoned professional with extensive expertise in observability and a consistent track record of elevating products from 0 to 1, I welcome meaningful conversations and potential collaborations.
 
-<div class="gallery-box">
-  <div class="gallery">
-    <img src="/images/102.jpg">
-    <img src="/images/105.jpg">
-    <img src="/images/107.jpg">
-  </div>
-  <em>Gallery / <a href="https://unsplash.com/" target="_blank">Unsplash</a></em>
-</div>
+## My Philosophy
+In the realm of product management, I operate with a distinct ethos – one forged at the intersection of technology, business, and analytics. I describe it as the 'techie-turned-PM' spirit. This unique blend empowers me to bridge the often elusive gap between technical intricacies and business imperatives, delivering tangible value.
 
-Completely synergize resource taxing relationships via premier niche markets. Cultivate one-to-one customer service with robust ideas. Dynamically innovate resource-leveling customer service for state of the art customer service.
+## What Drives Me
+Central to my leadership approach is a profound commitment to understanding and addressing the authentic needs of our customers. I prioritise identifying the true problem at hand, eschewing the allure of mere consensus. The journey, from the initial stages of discovery and design to the final phases of development, is fueled by my relentless pursuit of groundbreaking innovation. I am impassioned by the challenges we surmount and the transformative solutions we craft, with the end-user consistently at the epicentre of our endeavours.
 
-Objectively innovate empowered manufactured products whereas parallel platforms. Holisticly predominate extensible testing procedures for reliable supply chains. Dramatically engage top-line web services vis-a-vis cutting-edge deliverables.
+## My Current Role
+At Elastic, my mandate is extensive. I steer a diverse team scattered across the globe, comprising engineers, UX designers, and marketing aficionados. Our collective mission revolves around the eBPF-based Continuous Profiling product, seamlessly integrating with avant-garde platforms like OpenTelemetry and ML/AIOps.
 
-### Synergistically evolve
+## My Expertise
+- Mastery over Cloud-Native Technologies
+- Adeptness in Data-Driven Decision Making
+- Proficient Leadership & Team Management
+- Robust Analytical & Problem-Solving Skills
 
-Globally incubate standards compliant channels before scalable benefits. Quickly disseminate superior deliverables whereas web-enabled applications. Quickly drive clicks-and-mortar catalysts for change before vertical architectures.
+## Education
+- **MBA in Data Analytics** - Arden University, Coventry, UK 
+- **MSc in Telecommunications Engineering** - Middlesex University, London, UK 
+- **BSc in Computer Science** - Markudi, Nigeria.
 
-<p><iframe src="https://www.youtube.com/embed/gghgYaYeG_M" width="640" height="360" frameborder="0" allowfullscreen></iframe></p>
-
-Credibly reintermediate backend ideas for cross-platform models. Continually reintermediate integrated processes through technically sound intellectual capital. Holistically foster superior methodologies without market-driven best practices.
-
-Distinctively exploit optimal alignments for intuitive bandwidth. Quickly coordinate e-business applications through revolutionary catalysts for change. Seamlessly underwhelm optimal testing procedures whereas bricks-and-clicks processes.
+## Certifications
+- HashiCorp Certified: Terraform Associate
+- Certified Kubernetes Application Developer
+- Google Cloud Platform Certified Architect 
+- The Open Group Framework (TOGAF 9) Certified 
+- Microsoft Certified Solution Architect: Azure Cloud Platform
