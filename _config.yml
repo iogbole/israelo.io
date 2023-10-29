@@ -27,7 +27,7 @@ social:
 # Hero Settings
 hero:
   hero__title: Hey, I’m Israel Ogbole
-  hero__description: I use this space to share personal thoughts and experiences with Open Source Software, Raspberry Pi, Cloud-native technologies, and life in general. <br> Also, I will journal Naomi's programming journey here. Naomi is my nine-year-old daughter who loves coding.
+  hero__description: Welcome to israelo.io. Holding an MBA in Data Analytics and with over 7 years steeped in the cloud-native observability domain, I've become a trusted voice in observability product management and strategy. Here, you'll find a deep dive into my insights on DevOps, Raspberry Pi, Cloud-native technologies, and life in its varied hues. <br> Additionally, I chronicle the programming adventures of Naomi, my nine-year-old daughter who harbours a love for coding. Delve into my expertise on eBPF, OpenTelemetry, and ML/AIOps. 
   hero__image: "/images/01.jpg"
 
 #-------------------------------
@@ -43,24 +43,24 @@ gallery:
   gallery__title: Gallery
   gallery__columns: 3
   gallery__images:
-    - alt: "Rest"
-      url: "/images/100.jpg"
-    - alt: "Lifestyle"
-      url: "/images/101.jpg"
-    - alt: "Hobby"
-      url: "/images/102.jpg"
-    - alt: "Notes"
-      url: "/images/103.jpg"
-    - alt: "Rest"
-      url: "/images/104.jpg"
-    - alt: "Hobby"
-      url: "/images/105.jpg"
-    - alt: "Fashion"
-      url: "/images/106.jpg"
-    - alt: "Notes"
-      url: "/images/107.jpg"
-    - alt: "Rest"
-      url: "/images/108.jpg"
+    - alt: "CKAD"
+      url: "/images/g3-ckad.png"
+    - alt: "Terraform"
+      url: "/images/g7-tf.png"
+    - alt: "TOGAF"
+      url: "/images/g8-togf.png"
+    - alt: "ea"
+      url: "/images/g10-ea.jpeg"
+    - alt: "Isovalent"
+      url: "/images/g2-goldensig.png"
+    - alt: "MCSA"
+      url: "/images/g6-mcsa.png"
+    - alt: "Azure"
+      url: "/images/g1-azure.png"
+    - alt: "IpV6"
+      url: "/images/g-4ipv6.png"
+    - alt: "arch"
+      url: "https://user-images.githubusercontent.com/2548160/110439966-087de580-80b0-11eb-8aef-4af57fff85b5.jpeg"
 
 #-------------------------------
 # Contact Settings
