@@ -53,17 +53,23 @@ layout: default
 
       {% endif %}
 
-      {% if page.tags.size >= 1 %}
-      <div class="post__tags" style="margin: 0 auto;">
-        <span>Tags:</span>
-        {% for tag in page.tags %}
-        <a href="{{ site.baseurl }}/tags#{{ tag }}" class="post__tag">{{ tag }}</a>
-        {% endfor %}
-
-      </div>
-      {% endif %}
 
     </div>
+
+      <!-- tags-->
+      {% if page.tags.size >= 1 %}
+      <div style="display: flex; justify-content: center; align-items: center; min-height: 5vh;">
+        <div class="post__tags" style="margin: 0 auto;">
+          <span></span>
+          {% for tag in page.tags %}
+          <a href="{{ site.baseurl }}/tags#{{ tag | downcase }}" class="post__tag">#{{ tag | downcase }}</a>
+          {% endfor %}
+        </div>
+      </div>
+      
+      {% endif %}
+      
+      <!-- end tag-->
   </div>
 </div>
 
@@ -75,6 +81,8 @@ layout: default
     <div class="post__content">
       {{ content }}
     </div>
+
+  
 
     <div class="post__share">
       <ul class="share__list list-reset">
@@ -109,6 +117,7 @@ layout: default
   </article>
 </div>
 <!-- end post -->
+
 
 {% include related-posts.html %}
 
