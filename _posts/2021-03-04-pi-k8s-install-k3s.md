@@ -3,7 +3,7 @@ layout: post
 title:  "Raspberry Pi Cluster: Setting up K3s Kubernetes using Ansible - Part#3"
 author: israel
 categories: [ 'Cloud Native', 'Pi' ]
-tags: [containers, raspberry,  pi, cloud-native, kubernetes, IoT, edge ]
+tags: [ containers, raspberry,  pi, cloud-native, kubernetes, IoT, edge ]
 image: https://user-images.githubusercontent.com/2548160/110161490-54e1d080-7de5-11eb-8b73-676ce5b0a9c7.jpg
 date:   2021-03-06 15:01:35 +0300
 description: "This tutorial will be a brief walk through the process of getting K3s Kubernetes up and running on Raspberry Pi - Using Ansible..."

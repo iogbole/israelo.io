@@ -3,7 +3,7 @@ layout: post
 title:  "Tribute to Ioannis Christoudis - A colleague & a mentee turned friend "
 author: israel
 categories: [ 'Personal' ]
-tags: [tribute, mentorship, ioannis]
+tags: [ tribute, mentorship, ioannis]
 image: https://user-images.githubusercontent.com/2548160/104447887-54bb1680-5594-11eb-9e21-9c3900d5d7da.png
 date:   2021-01-13 15:01:35 +0300
 description: "Farewell my friend, Ioannis. Sorry, you had to close the chapter this soon. I am happy for the opportunity to have mentored you...You spoke about your recovery from COVID, and I told you about my recovery from COVID, too. But COVID came back for you, this time, not to spare. 

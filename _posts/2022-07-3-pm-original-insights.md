@@ -4,7 +4,7 @@ title:  "Product Leaders must focus on Orginial Insigts - Jetu"
 author: israel
 featured: false
 categories: [ 'Personal', 'Cloud Native', 'Product' ]
-tags:  mentor, product ]
+tags:  [ mentor, product ]
 image: https://user-images.githubusercontent.com/2548160/180667264-e656bcf1-013b-4f30-b233-6f7cf893bf99.jpg
 date:   2022-07-18 15:01:35 +0300
 description: "Measure yourself with the frequency and quality of original insights that you and your team come up with that make your value unique..."

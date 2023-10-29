@@ -4,7 +4,7 @@ title:  "Raspberry Pi Kubernetes Cluster: Getting Started - Part#1"
 author: israel
 redirect_from: /draft/pi
 categories: [ 'Cloud Native', 'Pi' ]
-tags: [containers, raspberry,  pi, cloud-native, kubernetes, IoT, edge ]
+tags: [ containers, raspberry,  pi, cloud-native, kubernetes, IoT, edge ]
 image: https://user-images.githubusercontent.com/2548160/107711684-f0d55c00-6cbf-11eb-8985-59b1ecd9b064.jpg
 date:   2021-02-12 15:01:35 +0300
 description: "I had a few websites running on a managed hosting platform. This blog series describes how I am now running those public-facing websites (including a NAS server) from home using a Raspberry Pi Kubernetes Cluster..."

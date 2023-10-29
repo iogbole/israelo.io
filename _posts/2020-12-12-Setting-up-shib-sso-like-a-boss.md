@@ -21,7 +21,7 @@ SSO is an authentication method that enables users to securely log in to one or 
 
 There are various types of SSO authentication, such as Kerberos, Smart-card, IWA, SAML, etc.  This blog post focuses on SAML 2.0, which has three main components, as shown in the diagram below:
 
-![SSO]({{ site.baseurl }}/assets/images/sso_comp.jpg)
+![SSO]({{ site.baseurl }}//images/sso_comp.jpg)
 
 I have worked on the Service Provider side of the SSO coin for nearly all of my career; thus, I have seen my fair share of SSO integration complexities and issues.
 
@@ -39,7 +39,7 @@ This post consists mainly of my notes from this rather unusual challenge. It may
 
 The diagram below depicts the end goal of this setup guide:
  
- ![SSO]({{ site.baseurl }}/assets/images/sso_flow.png)
+ ![SSO]({{ site.baseurl }}//images/sso_flow.png)
 
 ### Hardware Requirements
 
